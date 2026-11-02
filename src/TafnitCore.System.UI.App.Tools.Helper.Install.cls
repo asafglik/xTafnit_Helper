@@ -9,17 +9,28 @@ Class TafnitCore.System.UI.App.Tools.Helper.Install [ Abstract, DependsOn = Tafn
 
 Projection AutoInstall As TafnitCore.System.UI.App.Tools.Helper.AutoInstall;
 
+/// חייב להיות שווה ל-$$version^core.TafnitHelperUtils() - כך ההתקנה ברקע לא תרוץ על גרסה ישנה של הרוטינה
+/// שעוד נמצאת ב-IRIS בזמן ש-LoadDir מקמפל את החדשה
+Parameter VERSION = 2;
+
 /// ההתקנה ברקע (JOB). מחכה שכל רכיבי החבילה יקומפלו ואז מריץ את ההתקנה המלאה.
 ClassMethod Background()
 {
     // החבילה נטענת כולה ורק אז מקומפלת - מחכים עד שהרכיבים זמינים (עד 2 דקות)
     hang 3
+    set tDeployed=0
     for i=1:1:120 {
-        quit:..Ready()
+        quit:..Ready(.tWhy)
+        // LoadDir לא תמיד טוען את ה-.mac: אם הרוטינה חסרה או ישנה - כותבים אותה מהעותק שב-WebFiles
+        if 'tDeployed,tWhy["core.TafnitHelperUtils version",##class(%Dictionary.CompiledClass).%ExistsId("TafnitCore.System.UI.App.Tools.Helper.WebFiles") {
+            set tDeployed=1
+            set tSC=##class(TafnitCore.System.UI.App.Tools.Helper.WebFiles).DeployRoutine()
+            if $$$ISERR(tSC) do ..Record("[x] core.TafnitHelperUtils from WebFiles: "_$SYSTEM.Status.GetErrorText(tSC))
+        }
         hang 1
     }
-    if '..Ready() {
-        do ..Record("[x] Package components are not compiled - install skipped. Run: do install^core.TafnitHelperUtils()")
+    if '..Ready(.tWhy) {
+        do ..Record("[x] Package not ready ("_tWhy_") - install skipped. Run: do install^core.TafnitHelperUtils()")
         quit
     }
     set tLog=$$runLog^core.TafnitHelperUtils()
@@ -27,15 +38,26 @@ ClassMethod Background()
 }
 
 /// כל הרכיבים מקומפלים: הרוטינה, מחלקות החבילה, וכפתור הצף ב-commonXTafPage
-ClassMethod Ready() As %Boolean
+/// pWhy = מה עוד לא מוכן
+ClassMethod Ready(Output pWhy As %String) As %Boolean
 {
-    if $TEXT(^core.TafnitHelperUtils)="" quit 0
-    set tOK=1
-    for tCls="Session","Relay","API","HelperPage","WebFiles" {
-        if '##class(%Dictionary.CompiledClass).%ExistsId("TafnitCore.System.UI.App.Tools.Helper."_tCls) { set tOK=0 quit }
+    set pWhy=""
+    // הרוטינה מקומפלת בגרסה של החבילה (ולא גרסה ישנה מהתקנה קודמת)
+    set tVersion="", tErr=""
+    try { set tVersion=$$version^core.TafnitHelperUtils() } catch tEx { set tErr=tEx.Name }
+    if tVersion'=..#VERSION {
+        set pWhy="core.TafnitHelperUtils version "_$SELECT(tErr'="":tErr,tVersion="":"missing",1:tVersion)_", expected "_..#VERSION
+        quit 0
     }
-    if 'tOK quit 0
-    quit ##class(%Dictionary.CompiledMethod).%ExistsId("TafnitCore.System.UI.App.commonXTafPage||AddRemoteHelpButton")
+    for tCls="Session","Relay","API","HelperPage","WebFiles" {
+        if '##class(%Dictionary.CompiledClass).%ExistsId("TafnitCore.System.UI.App.Tools.Helper."_tCls) { set pWhy=pWhy_$SELECT(pWhy'="":", ",1:"")_tCls_" not compiled" }
+    }
+    if pWhy'="" quit 0
+    if '##class(%Dictionary.CompiledMethod).%ExistsId("TafnitCore.System.UI.App.commonXTafPage||AddRemoteHelpButton") {
+        set pWhy="commonXTafPage has no AddRemoteHelpButton"
+        quit 0
+    }
+    quit 1
 }
 
 /// שומר את הלוג ומודיע ב-messages.log

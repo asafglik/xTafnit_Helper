@@ -27,6 +27,11 @@ ROUTINE core.TafnitHelperUtils
  ; ללא פלט (למשל מ-Native API): set log=$$runLog^core.TafnitHelperUtils(srcDir,hosts)
  quit
 
+ ; גרסת הרוטינה - Install.Ready() מחכה שהגרסה הזו תקומפל לפני ההתקנה ברקע (להעלות יחד עם Install.VERSION)
+version() public {
+	quit 2
+}
+
 install(srcDir="",hosts="",pages="TafnitCore.System.UI.App.Login",resetIIS=0,site="Default Web Site",webRoot="C:\inetpub\wwwroot\",httpsCert="",requireSSL=0) public {
 	set sc = $$run(srcDir,hosts,pages,resetIIS,site,webRoot,1,httpsCert,requireSSL)
 	write !,$select($$$ISOK(sc):"[v] Done.",1:"[x] "_$system.Status.GetErrorText(sc)),!
