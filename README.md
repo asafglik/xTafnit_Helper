@@ -48,7 +48,7 @@ set ^["TAFNIT_PARAMETERS"]xTafnitParams("BaseURLs","erp.example.co.il","helper",
 | --- | --- |
 | `src/` | המחלקות `TafnitCore.System.UI.App.Tools.Helper.*`, הרוטינה `core.TafnitHelperUtils`, ו-`commonXTafPage` (מחלקת ליבה – הכפתור הצף) |
 | `web/` | `xtafnit-rh.js`, ‏`helper.html` (UTF-8 עם BOM) |
-| `tools/build-webfiles.ps1` | מייצר את `src/...WebFiles.cls` מתוך `web/` – להריץ אחרי כל שינוי ב-`web/` |
+| `tools/build-webfiles.ps1` | מייצר את `src/...WebFiles.cls` מתוך `web/` ו-`src/core.TafnitHelperUtils.mac` – להריץ אחרי כל שינוי בהם. כך ההתקנה שלמה גם כש-`LoadDir` טוען רק את המחלקות |
 
 ## מסכים
 
