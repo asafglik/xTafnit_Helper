@@ -1,0 +1,142 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Export generator="IRIS" version="26" zv="IRIS for Windows (x86-64) 2025.1.5 (Build 685U)" ts="2026-11-01 20:49:52">
+<Class name="TafnitCore.System.UI.App.commonXTafPage">
+<Super>TafnitCore.System.UI.components.xTafPage,TafnitCore.System.UI.Compiled.TafnitCoreSystemUIAppcommonXTafPage</Super>
+<TimeChanged>67837,33789.473381</TimeChanged>
+<TimeCreated>63081,49190.782855</TimeCreated>
+<DependsOn>TafnitCore.System.UI.components.xTafPage</DependsOn>
+
+<Method name="onPrepage">
+<ReturnType>%Status</ReturnType>
+<Implementation><![CDATA[
+	/// #### 		Is the menu button  not appearing?			####
+	/// ####  Have you added "d ##super()" to your onPrepage()? ####
+	
+	s ..ToolBar = ..basicToolbar
+	
+	s st = ..basicToolbar.GetButtonById("btnMenu", .btnMenu)
+	s str = "<div class='k-button' onclick='SendJSON(HomePagebtn"_..basicToolbar.ControlID_")'><span class='fal fa-home'></span></div>"
+	
+	s str1 = "var HomePagebtn"_..basicToolbar.ControlID_" = "_..basicToolbar.RaiseEventCallBack("GoToHomepage", "onClickEvent").ToJSON()_";"
+				
+	s btnMenu.template = str
+	s strm = ##class(%GlobalBinaryStream).%New()
+	d strm.Write(str1)
+	s btnMenu.templateStream = strm
+	
+	
+	s st = ..basicToolbar.GetButtonById("tbHeader", .btnHeader)
+	s btnHeader.text = ..Title
+	
+	
+	i (..Environment.Security.AuthorizedToUseDevMode()) 
+	{	
+	
+		s st = ..basicToolbar.GetButtonById("btnDev", .devMode)
+		s devMode.onToggle = "DevModePressed"
+		
+		i (..Environment.DevMode)	
+		{
+			s devMode.selected = 1
+		} else {
+			s devMode.selected = 0	
+		}
+		s devMode.togglable = "true"
+		
+	} else {
+		
+		;s st = ..basicToolbar.RemoveButton("btnDev")
+		s ..btnDev.Visible=0
+		s ..btnTracker.Visible=0
+		
+	}
+	
+	if (..Environment.Client.isMobile())
+	{
+		s ..btnDev.overflow = "always"
+		s ..btnMenu.overflow = "never"
+	}
+	
+	i '..IsDevTeam() s ..btnRfrsh.Visible = 2
+		
+	// עזרה מרחוק - כפתור צף בכל מסך שיורש מ-commonXTafPage
+	d ##class(TafnitCore.System.UI.App.commonXTafPage).AddRemoteHelpButton(##this)
+		
+	q 1
+]]></Implementation>
+</Method>
+
+<XData name="eTafnitWebApplication">
+<XMLNamespace>http://www.tafnitERP.co.il/xTafnit/V1.1</XMLNamespace>
+<Data><![CDATA[
+<page>
+
+<header>
+
+<iToolbar Name="basicToolbar" NoCaption="true">
+<iToolBarButton Name="tbHeader" type="caption" overflow="never" />
+<iToolBarButton type="spacer" />
+
+<iToolBarButton Name="btnDev" type="button" BootstrapClass="x-button-secondary" Caption="DEV MODE" />
+<itoolbarbutton Name="btnRfrsh" type="button" Caption="Rfrsh" 	onClick="CommonRefreshPage" overflow="never" />
+<iToolBarButton Name="btnMenu" type="template" onClick="GoToHomepage" BootstrapClass="x-button-secondary" overflow="never" />
+
+<iToolBarButton Name="btnTracker" type="button" Caption="Tracker" onClick="PageOpenTracker" BootstrapClass="x-button-secondary" overflow="always"/>
+<iToolBarButton Name="btnCompanyOF" Type="button" Caption="שנה חברה" onClick="ChangeCompany" overflow="always" />
+<iToolBarButton Name="btnTemplatesOF" Type="button" Caption="תבניות עיצוב" onClick="SetTheme" overflow="always" />
+<iToolBarButton Name="btnInformationOF" Type="button" Caption="פרטים נוספים" onClick="GeneralDetails" overflow="always" />
+<iToolBarButton Name="btnLogoutOF" Type="button" Caption="התנתק" onClick="GoToLogin" overflow="always" />
+<iToolBarButton Name="btnCloseOF" Type="button" Caption="סגור" onClick="Close" overflow="always" />
+</iToolbar>
+
+</header>
+
+</page>
+]]></Data>
+</XData>
+
+<Method name="CommonRefreshPage">
+<FormalSpec>e</FormalSpec>
+<Implementation><![CDATA[
+	s pageName = $p(##this, "@", 2)
+	d ..GoToPage(pageName)
+]]></Implementation>
+</Method>
+<Method name="AddRemoteHelpButton">
+<Description>
+כפתור צף "עזרה מרחוק" (floatButton בשם btnRemoteHelp). הלחיצה נתפסת בדפדפן ע"י xtafnit-rh.js לפי השם.
+מוצג רק אם רכיב העזרה מרחוק מותקן, והמסך הופעל לכתובת שגולשים בה:
+  s ^["TAFNIT_PARAMETERS"]xTafnitParams("BaseURLs", {SERVER_NAME}, "helper", {שם מחלקת המסך})=1
+ולא נוסף אם המסך כבר מגדיר control בשם btnRemoteHelp.
+ClassMethod (ולא Method) כדי שלא יידרש לקמפל מחדש את כל המסכים שיורשים מ-commonXTafPage.</Description>
+<ClassMethod>1</ClassMethod>
+<FormalSpec>page:TafnitCore.System.UI.components.page</FormalSpec>
+<Implementation><![CDATA[
+	try {
+		q:'##class(%Dictionary.CompiledClass).%ExistsId("TafnitCore.System.UI.App.Tools.Helper.Session")
+		q:'$IsObject(page)||'$IsObject(page.body)
+		s host = $ZCORE.Environment.WebInfo.initialCGIVAR("SERVER_NAME")
+		q:(host="")||'$g(^["TAFNIT_PARAMETERS"]xTafnitParams("BaseURLs", host, "helper", page.%ClassName(1)), 0)
+		q:page.Controls.IsDefined("btnRemoteHelp")
+		
+		#dim btn As TafnitCore.System.UI.components.floatButtonV2
+		s st = page.body.CreateControl("floatButton", "btnRemoteHelp", .btn)
+		q:$$$ISERR(st)
+		s btn.Caption 				= "עזרה מרחוק"
+		s btn.iconClass 			= "fas fa-headset"
+		s btn.positionMode 			= "fixed"
+		s btn.verticalPosition 		= "bottom"
+		s btn.horizontalPosition 	= "end"
+		s btn.xOffset 				= 24
+		s btn.yOffset 				= 24
+		s btn.buttonSize 			= "large"
+		s btn.borderRadius 			= "full"
+		s btn.backgroundColor 		= "primary"
+		d page.body.AppendControl(btn)
+	} catch ex {
+		// הכפתור אינו קריטי - לא מפילים את המסך
+	}
+]]></Implementation>
+</Method>
+</Class>
+</Export>

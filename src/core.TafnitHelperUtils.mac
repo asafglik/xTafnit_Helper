@@ -1,0 +1,475 @@
+ROUTINE core.TafnitHelperUtils
+#include %occStatus
+ ; core.TafnitHelperUtils - עזרה מרחוק xTafnit (TafnitCore.System.UI.App.Tools.Helper) - התקנה מלאה
+ ;
+ ; התקנה אוטומטית: טעינת החבילה (do $system.OBJ.LoadDir("<repo>\src","ck",,1)) מפעילה ברקע
+ ; את install בלי פרמטרים (TafnitCore.System.UI.App.Tools.Helper.Install / AutoInstall).
+ ;
+ ; הרצה ידנית בטרמינל של IRIS, ב-namespace של xTafnit (MATRIXSYS), עם משתמש בעל %Admin_Secure:
+ ;   do install^core.TafnitHelperUtils()                         ; הכול כבר טעון: קומפילציה + קבצי ווב מ-WebFiles
+ ;   do install^core.TafnitHelperUtils("C:\xtafnit-remote-help\")
+ ;   do install^core.TafnitHelperUtils("C:\xtafnit-remote-help\","localhost,erp.example.co.il")
+ ;   do install^core.TafnitHelperUtils("","localhost",,1)   ; בלי תיקיית מקור: רק קומפילציה; 1 = iisreset בסוף
+ ;
+ ; פרמטרים:
+ ;   srcDir   - התיקייה עם קבצי הפתרון (cls / xml / js / html). ריק = לקמפל את מה שכבר טעון
+ ;   hosts    - רשימת SERVER_NAME (DNS/IP) מופרדת בפסיק שבהן יופעל הכפתור הצף
+ ;   pages    - רשימת מחלקות מסך מופרדת בפסיק (ברירת מחדל: מסך הכניסה)
+ ;   resetIIS - 1 = להריץ iisreset בסוף (נדרש אחרי התקנת WebSocket Protocol)
+ ;   site     - אתר ה-IIS (ברירת מחדל Default Web Site)
+ ;   webRoot  - תיקיית השורש של האתר (ברירת מחדל C:\inetpub\wwwroot\)
+ ;   httpsCert  - thumbprint של תעודה ב-LocalMachine\My: יוצר binding של https:443 אם אין (ריק = לא נוגע)
+ ;   requireSSL - 1 = /xtafnit-rh ו-helper.html רק ב-HTTPS (אז מ-HTTP אי אפשר לבקש עזרה)
+ ;   do install^core.TafnitHelperUtils("C:\xtafnit-remote-help\","erp.example.co.il",,1,,,"A1B2...THUMBPRINT")
+ ;
+ ; השלבים: 1. IIS  2. Web Applications  3. קומפילציה וקבצי ווב  4. WebSocket וחיבור  5. פרמטרים
+ ; כל שלב בודק קודם מה קיים ומשנה רק מה שחסר - אפשר להריץ שוב.
+ ; ללא פלט (למשל מ-Native API): set log=$$runLog^core.TafnitHelperUtils(srcDir,hosts)
+ quit
+
+install(srcDir="",hosts="",pages="TafnitCore.System.UI.App.Login",resetIIS=0,site="Default Web Site",webRoot="C:\inetpub\wwwroot\",httpsCert="",requireSSL=0) public {
+	set sc = $$run(srcDir,hosts,pages,resetIIS,site,webRoot,1,httpsCert,requireSSL)
+	write !,$select($$$ISOK(sc):"[v] Done.",1:"[x] "_$system.Status.GetErrorText(sc)),!
+	quit
+}
+
+ ; כמו install, בלי כתיבה למסך - מחזיר את הלוג כטקסט
+runLog(srcDir="",hosts="",pages="TafnitCore.System.UI.App.Login",resetIIS=0,site="Default Web Site",webRoot="C:\inetpub\wwwroot\",httpsCert="",requireSSL=0) public {
+	set sc = $$run(srcDir,hosts,pages,resetIIS,site,webRoot,0,httpsCert,requireSSL)
+	set text = ""
+	for i=1:1:$get(%TafnitHelperLog) { set text = text_%TafnitHelperLog(i)_$char(13,10) }
+	kill %TafnitHelperLog
+	quit text_$select($$$ISOK(sc):"[v] Done.",1:"[x] "_$system.Status.GetErrorText(sc))
+}
+
+run(srcDir,hosts,pages,resetIIS,site,webRoot,echo,httpsCert="",requireSSL=0) public {
+	kill %TafnitHelperLog
+	set %TafnitHelperEcho = echo
+	set home = $namespace, errors = 0
+	// מסמן שהתקנה רצה - ה-Projection של Install לא יפעיל התקנה נוספת כשהחבילה מקומפלת כאן
+	set ^IRIS.Temp.TafnitHelper("installing") = $job
+	set pkg = "TafnitCore.System.UI.App.Tools.Helper", cspApp = "/xtafnit", restApp = "/xtafnit-rh"
+	try {
+		if '$system.Security.Check("%Admin_Secure","USE") {
+			throw ##class(%Exception.General).%New("Admin","5001",,"Requires %Admin_Secure:USE")
+		}
+		if srcDir'="" set srcDir = ##class(%File).NormalizeDirectory(srcDir)
+		set webRoot = ##class(%File).NormalizeDirectory(webRoot)
+		set appPath = $$appProp(cspApp,"Path")
+		if appPath="" {
+			throw ##class(%Exception.General).%New("App","5001",,"Web application "_cspApp_" not found - install xTafnit first")
+		}
+		set appPath = ##class(%File).NormalizeDirectory(appPath)
+		do log("namespace "_home_", CSP path "_appPath_$select(srcDir'="":", source "_srcDir,1:""))
+
+		do head("1. IIS")
+		set errors = errors + $$iis(site,webRoot,$piece(cspApp,"/",2),$piece(restApp,"/",2),resetIIS,.dllDir,httpsCert,requireSSL)
+		do head("2. Web Applications")
+		set errors = errors + $$webApps(home,cspApp,restApp,pkg)
+		do head("3. Classes and web files")
+		set errors = errors + $$compile(srcDir,pkg,appPath)
+		do head("4. WebSocket and connection")
+		set errors = errors + $$connection($get(dllDir),cspApp,restApp,pkg,requireSSL)
+		do head("5. Parameters")
+		set errors = errors + $$params(hosts,pages)
+	} catch ex {
+		do log("[x] "_ex.DisplayString())
+		set errors = errors + 1
+	}
+	set $namespace = home
+	kill %TafnitHelperEcho, ^IRIS.Temp.TafnitHelper("installing")
+	quit $select(errors:$$$ERROR($$$GeneralError,errors_" problem(s) - see the [x] lines above"),1:$$$OK)
+}
+
+ ; ───────────── 1. IIS ─────────────
+
+ ; handler xTafnit_ALL (* -> CSPms) על שתי התיקיות, default.csp, מודול CSPms, ו-WebSocket Protocol
+iis(site,webRoot,appFolder,restFolder,resetIIS,dllDir,httpsCert="",requireSSL=0) {
+	set err = 0, dllDir = ""
+	set windir = $system.Util.GetEnviron("windir")
+	set appcmd = windir_"\System32\inetsrv\appcmd.exe"
+	if '##class(%File).Exists(appcmd) { do log("[x] IIS not installed ("_appcmd_" not found)") quit 1 }
+
+	// אתר ו-bindings (HTTP + HTTPS)
+	set rc = $$exec(appcmd,.out,"list","site",site)
+	if out'[site { do log("[x] IIS site not found: "_site_" (appcmd exit "_rc_": "_$$trim(out)_")") quit 1 }
+	set bindings = $piece($piece(out,"bindings:",2),",state",1)
+	do log("[v] Site "_site_" - bindings "_bindings)
+	if bindings'["http/" do log("[!] No HTTP binding on "_site)
+	set httpsCert = $zconvert($zstrip(httpsCert,"*W"),"U")
+	if bindings'["https/" {
+		if httpsCert="" {
+			do log("[!] No HTTPS binding on "_site_" - traffic (codes, screen content) is not encrypted. Rerun with httpsCert=<thumbprint>")
+		} else {
+			set rc = $$exec(appcmd,.out,"set","site",site,"/+bindings.[protocol='https',bindingInformation='*:443:']")
+			if rc { do log("[x] HTTPS binding: "_$$trim(out)) set err = err + 1 }
+			else {
+				// התעודה חייבת להיות ב-LocalMachine\My; appid = מזהה קבוע של IIS
+				set rc = $$exec(windir_"\System32\netsh.exe",.out,"http","add","sslcert","ipport=0.0.0.0:443","certhash="_httpsCert,"appid={4dc3e181-e14b-4a21-b022-59fc669b0914}","certstorename=MY")
+				if rc,$zconvert(out,"L")'["already" { do log("[x] HTTPS certificate "_httpsCert_": "_$$trim(out)) set err = err + 1 }
+				else  { do log("[v] HTTPS binding *:443 with certificate "_httpsCert) }
+			}
+		}
+	} elseif httpsCert'="" {
+		do log("[-] HTTPS binding exists - certificate not changed")
+	}
+
+	// מודול ה-Web Gateway
+	set rc = $$exec(appcmd,.out,"list","config","-section:system.webServer/globalModules")
+	set image = ""
+	if out["name=""CSPms""" set image = $piece($piece($piece(out,"name=""CSPms""",2),"image=""",2),"""",1)
+	if image="" {
+		for candidate="C:\inetpub\CSPGateway\CSPms.dll",$system.Util.InstallDirectory()_"CSP\bin\CSPms.dll" {
+			if ##class(%File).Exists(candidate) set image = candidate quit
+		}
+		if image="" { do log("[x] InterSystems Web Gateway for IIS (CSPms.dll) not found - install it from the IRIS kit") quit 1 }
+		set rc = $$exec(appcmd,.out,"install","module","/name:CSPms","/image:"_image)
+		if rc { do log("[x] Register CSPms: "_$$trim(out)) quit 1 }
+		do log("[v] Registered IIS module CSPms -> "_image)
+	} else {
+		set rc = $$exec(appcmd,.out,"list","config","-section:system.webServer/modules")
+		if out'["name=""CSPms""" {
+			set rc = $$exec(appcmd,.out,"add","module","/name:CSPms")
+			if rc { do log("[x] Enable CSPms: "_$$trim(out)) set err = err + 1 }
+			else  { do log("[v] Enabled module CSPms") }
+		}
+		do log("[v] CSPms -> "_image)
+	}
+	set dllDir = ##class(%File).GetDirectory($replace(image,"%windir%",windir))
+
+	// תיקיית ה-REST (ריקה - כל הבקשות עוברות ל-CSPms)
+	set restPath = webRoot_restFolder
+	if '##class(%File).DirectoryExists(restPath) {
+		if '##class(%File).CreateDirectoryChain(restPath) { do log("[x] Cannot create "_restPath) quit err + 1 }
+		do log("[v] Created "_restPath)
+	}
+	if '##class(%File).DirectoryExists(webRoot_appFolder) do log("[!] "_webRoot_appFolder_" not found - the xTafnit web folder should be under the site root")
+
+	// handler ראשון ברשימה: * -> CSPms
+	for folder=appFolder,restFolder {
+		set location = site_"/"_folder
+		set rc = $$exec(appcmd,.out,"list","config",location,"-section:system.webServer/handlers")
+		if out["name=""xTafnit_ALL""" { do log("[-] Handler xTafnit_ALL exists on "_location) continue }
+		set rc = $$exec(appcmd,.out,"set","config",location,"-section:system.webServer/handlers","/+[@start,name='xTafnit_ALL',path='*',verb='*',modules='CSPms',resourceType='Unspecified',requireAccess='Script']","/commit:apphost")
+		if rc { do log("[x] Handler on "_location_": "_$$trim(out)) set err = err + 1 }
+		else  { do log("[v] Handler xTafnit_ALL (* -> CSPms) on "_location) }
+	}
+
+	// מסמך ברירת מחדל
+	set location = site_"/"_appFolder
+	set rc = $$exec(appcmd,.out,"list","config",location,"-section:system.webServer/defaultDocument")
+	if out'["value=""default.csp""" {
+		set rc = $$exec(appcmd,.out,"set","config",location,"-section:system.webServer/defaultDocument","/+files.[@start,value='default.csp']","/commit:apphost")
+		if rc { do log("[x] Default document: "_$$trim(out)) set err = err + 1 }
+		else  { do log("[v] Default document default.csp on "_location) }
+	} else { do log("[-] Default document default.csp exists") }
+
+	// HTTPS בלבד לעזרה מרחוק (אופציונלי) - ה-REST ומסך העוזר העצמאי
+	for loc=site_"/"_restFolder,site_"/"_appFolder_"/helper.html" {
+		set rc = $$exec(appcmd,.out,"set","config",loc,"-section:system.webServer/security/access","/sslFlags:"_$select(requireSSL:"Ssl",1:"None"),"/commit:apphost")
+		if rc { do log("[x] sslFlags on "_loc_": "_$$trim(out)) set err = err + 1 }
+		elseif requireSSL { do log("[v] HTTPS required on "_loc) }
+	}
+
+	// WebSocket Protocol
+	set newFeature = 0
+	if '##class(%File).Exists(windir_"\System32\inetsrv\iiswsock.dll") {
+		do log("    Installing IIS WebSocket Protocol (dism)...")
+		set rc = $$exec(windir_"\System32\dism.exe",.out,"/online","/enable-feature","/featurename:IIS-WebSockets","/all","/norestart","/quiet")
+		if (rc'=0)&&(rc'=3010) { do log("[x] WebSocket Protocol (dism exit "_rc_"): "_$$trim(out)) set err = err + 1 }
+		else  { do log("[v] WebSocket Protocol installed") set newFeature = 1 }
+	} else { do log("[-] WebSocket Protocol installed") }
+	set rc = $$exec(appcmd,.out,"set","config","-section:system.webServer/webSocket","/enabled:true","/commit:apphost")
+	if rc { do log("[!] webSocket enabled=true: "_$$trim(out)) }
+
+	if resetIIS {
+		set rc = $$exec(windir_"\System32\iisreset.exe",.out,"/noforce")
+		do log($select(rc:"[x] iisreset: "_$$trim(out),1:"[v] iisreset"))
+		set:rc err = err + 1
+	} elseif newFeature {
+		do log("[!] Run iisreset (or rerun with resetIIS=1) so IIS loads the WebSocket module")
+	}
+	quit err
+}
+
+ ; ───────────── 2. Web Applications ─────────────
+
+ ; /xtafnit-rh (REST, Unauthenticated + Password), Resource xTafnit_RemoteSupport,
+ ; role ייעודי xTafnitRemoteHelp עם הרשאת קריאה בלבד ל-DB של הקוד (הנתונים ב-IRISTEMP)
+webApps(ns,cspApp,restApp,pkg) {
+	new $namespace
+	set err = 0
+	try {
+		set $namespace = "%SYS"
+
+		$$$ThrowOnError(##class(Security.Applications).Get(cspApp,.csp))
+		if '$zboolean(+csp("AutheEnabled"),64,1) do log("[!] "_cspApp_" does not allow Unauthenticated - the login page cannot request a code")
+		if 'csp("Enabled") do log("[!] "_cspApp_" is disabled")
+
+		if '##class(Security.Resources).Exists("xTafnit_RemoteSupport") {
+			$$$ThrowOnError(##class(Security.Resources).Create("xTafnit_RemoteSupport","xTafnit remote help - helper access",""))
+			do log("[v] Resource xTafnit_RemoteSupport created (no public permission)")
+		} else { do log("[-] Resource xTafnit_RemoteSupport exists") }
+
+		// role מינימלי: קריאה בלבד ל-DB של הקוד (כדי להריץ את מחלקות ה-REST);
+		// הסשנים נשמרים ב-IRISTEMP, שפתוח לכתיבה ציבורית - אין צורך ב-RW על נתוני xTafnit
+		$$$ThrowOnError(##class(Config.Namespaces).Get(ns,.nsProps))
+		$$$ThrowOnError(##class(Config.Databases).Get(nsProps("Routines"),.dbProps))
+		set db = ##class(SYS.Database).%OpenId(dbProps("Directory"),,.sc)
+		$$$ThrowOnError(sc)
+		set resources = db.ResourceName_":R", role = "xTafnitRemoteHelp"
+		// + קריאה ל-TAFNIT_PARAMETERS: הפרמטרים של העזרה מרחוק (xTafnitParams("BaseURLs",host,"helper",...))
+		if ##class(Config.Namespaces).Exists("TAFNIT_PARAMETERS") {
+			$$$ThrowOnError(##class(Config.Namespaces).Get("TAFNIT_PARAMETERS",.parProps))
+			$$$ThrowOnError(##class(Config.Databases).Get(parProps("Globals"),.parDb))
+			set pdb = ##class(SYS.Database).%OpenId(parDb("Directory"),,.sc)
+			$$$ThrowOnError(sc)
+			if (","_resources_",")'[(","_pdb.ResourceName_":R,") set resources = resources_","_pdb.ResourceName_":R"
+		} else { do log("[!] Namespace TAFNIT_PARAMETERS not found - per-host parameters unavailable") }
+		if ##class(Security.Roles).Exists(role) {
+			kill roleProps
+			set roleProps("Resources") = resources
+			$$$ThrowOnError(##class(Security.Roles).Modify(role,.roleProps))
+			do log("[v] Role "_role_" = "_resources)
+		} else {
+			$$$ThrowOnError(##class(Security.Roles).Create(role,"xTafnit remote help REST - read only",resources))
+			do log("[v] Role "_role_" created ("_resources_")")
+		}
+
+		kill props
+		set props("NameSpace") = ns
+		set props("DispatchClass") = pkg_".API"
+		set props("AutheEnabled") = 96		// 32 = Password, 64 = Unauthenticated
+		set props("Enabled") = 1
+		set props("Description") = "xTafnit remote help REST"
+		set props("MatchRoles") = ":"_role
+		if ##class(Security.Applications).Exists(restApp) {
+			$$$ThrowOnError(##class(Security.Applications).Modify(restApp,.props))
+			do log("[v] Web application "_restApp_" updated")
+		} else {
+			$$$ThrowOnError(##class(Security.Applications).Create(restApp,.props))
+			do log("[v] Web application "_restApp_" created")
+		}
+		do log("    "_restApp_": namespace "_ns_", dispatch "_pkg_".API, Unauthenticated + Password, role "_role_" (read only)")
+	} catch ex {
+		do log("[x] "_ex.DisplayString())
+		set err = err + 1
+	}
+	quit err
+}
+
+ ; ───────────── 3. קומפילציה וקבצי ווב ─────────────
+
+compile(srcDir,pkg,appPath) {
+	set err = 0
+	set common = "TafnitCore.System.UI.App.commonXTafPage"
+	if srcDir'="" {
+		// לפי סדר התלות; WebFiles / AutoInstall / Install - רק אם קיימים בתיקייה
+		set list = $listbuild(pkg_".Session",pkg_".Relay",pkg_".API",pkg_".HelperPage",pkg_".WebFiles",pkg_".AutoInstall",pkg_".Install",common)
+		for i=1:1:$listlength(list) {
+			set name = $list(list,i), file = ""
+			for ext=".cls",".xml" { if ##class(%File).Exists(srcDir_name_ext) set file = srcDir_name_ext quit }
+			if file="" {
+				if (name'[".Install")&&(name'[".AutoInstall")&&(name'[".WebFiles") { do log("[x] "_name_" not found in "_srcDir) set err = err + 1 }
+				continue
+			}
+			set tmp = $$noBOM(file)
+			set sc = $system.OBJ.Load(tmp,"ck-d",.errorlog,,,,,,"UTF8")
+			if tmp'=file do ##class(%File).Delete(tmp)
+			if $$$ISERR(sc) { do log("[x] "_name_": "_$system.Status.GetErrorText(sc)) set err = err + 1 }
+			else  { do log("[v] "_name_" loaded and compiled") }
+		}
+	} else {
+		set sc = $system.OBJ.CompilePackage(pkg,"ck-d")
+		do log($select($$$ISERR(sc):"[x] "_pkg_": "_$system.Status.GetErrorText(sc),1:"[v] "_pkg_".* compiled"))
+		set:$$$ISERR(sc) err = err + 1
+		set sc = $system.OBJ.Compile(common,"ck-d")
+		do log($select($$$ISERR(sc):"[x] "_common_": "_$system.Status.GetErrorText(sc),1:"[v] "_common_" compiled"))
+		set:$$$ISERR(sc) err = err + 1
+	}
+	if '##class(%Dictionary.CompiledMethod).%ExistsId(common_"||AddRemoteHelpButton") {
+		do log("[x] "_common_" has no AddRemoteHelpButton - load the updated commonXTafPage")
+		set err = err + 1
+	}
+
+	// קבצי ווב: xtafnit-rh.js לתיקיית scripts, helper.html לשורש (נשמר עם BOM)
+	// מקור: הקבצים בתיקיית המקור אם קיימים, אחרת המחלקה WebFiles (base64 - בלי צורך בתיקייה)
+	if (srcDir="")||'##class(%File).Exists(srcDir_"xtafnit-rh.js") {
+		if '##class(%Dictionary.CompiledClass).%ExistsId(pkg_".WebFiles") { do log("[x] No web files: "_pkg_".WebFiles is not compiled") quit err + 1 }
+		set sc = $classmethod(pkg_".WebFiles","Deploy",appPath,.files)
+		for i=1:1:$get(files) do log("[v] "_files(i)_" (from "_pkg_".WebFiles)")
+		if $$$ISERR(sc) { do log("[x] Web files: "_$system.Status.GetErrorText(sc)) set err = err + 1 }
+		do log("[!] Browsers cache xtafnit-rh.js (?v=...) - bump the framework version or Ctrl+F5 after an update")
+		quit err
+	}
+	for pair=$listbuild("xtafnit-rh.js","scripts\"),$listbuild("helper.html","") {
+		set src = srcDir_$list(pair,1), dst = appPath_$list(pair,2)
+		if '##class(%File).Exists(src) { do log("[x] "_src_" not found") set err = err + 1 continue }
+		do ##class(%File).CreateDirectoryChain(dst)
+		if '##class(%File).CopyFile(src,dst_$list(pair,1),1,.ret) { do log("[x] Copy "_$list(pair,1)_" ("_$get(ret)_")") set err = err + 1 }
+		else  { do log("[v] "_dst_$list(pair,1)) }
+	}
+	do log("[!] Browsers cache xtafnit-rh.js (?v=...) - bump the framework version or Ctrl+F5 after an update")
+	quit err
+}
+
+ ; UDL עם BOM נדחה ע"י Load (ERROR #16021) - מחזיר עותק זמני בלי BOM
+noBOM(file) {
+	set in = ##class(%Stream.FileBinary).%New()
+	do in.LinkToFile(file)
+	set head = in.Read(3)
+	if head'=$char(239,187,191) quit file
+	set ext = $zconvert($piece(file,".",*),"L")
+	set tmp = ##class(%File).TempFilename(ext)
+	set out = ##class(%Stream.FileBinary).%New()
+	do out.LinkToFile(tmp)
+	while 'in.AtEnd { do out.Write(in.Read(32000)) }
+	do out.%Save()
+	quit tmp
+}
+
+ ; ───────────── 4. WebSocket וחיבור ─────────────
+
+connection(dllDir,cspApp,restApp,pkg,requireSSL=0) {
+	set err = 0
+
+	// Web Gateway: הנתיב /xtafnit-rh חייב להיות ממופה לשרת IRIS (APP_PATH:/ מכסה הכול)
+	set ini = dllDir_"CSP.ini"
+	if (dllDir="")||'##class(%File).Exists(ini) {
+		do log("[!] CSP.ini not found"_$select(dllDir'="":" in "_dllDir,1:"")_" - check the Web Gateway application paths manually")
+	} else {
+		set lines = 0, server = "", inIndex = 0
+		set file = ##class(%Stream.FileCharacter).%New()
+		do file.LinkToFile(ini)
+		while 'file.AtEnd { set lines = lines + 1, lines(lines) = file.ReadLine() }
+		set covered = "", section = ""
+		for i=1:1:lines {
+			set line = $zstrip(lines(i),"<>W"), upper = $zconvert(line,"U")
+			if $extract(line)="[" set section = upper continue
+			if (section="[APP_PATH:/]")&&($piece(upper,"=")="DEFAULT_SERVER") set server = $piece(line,"=",2)
+			if (server="")&&(section="[SYSTEM_INDEX]")&&(upper["=ENABLED") set server = $piece(line,"=")
+		}
+		for i=1:1:lines { set upper = $zconvert($zstrip(lines(i),"<>W"),"U") if (upper="[APP_PATH:/]")||(upper=("[APP_PATH:"_$zconvert(restApp,"U")_"]")) set covered = lines(i) quit }
+		if covered'="" {
+			do log("[-] Web Gateway: "_restApp_" is served via "_$zstrip(covered,"<>W"))
+		} elseif server="" {
+			do log("[x] Web Gateway: no IRIS server found in "_ini) set err = err + 1
+		} else {
+			do ##class(%File).CopyFile(ini,ini_".bak-"_$translate($zdatetime($horolog,8),": "),1)
+			set out = ##class(%Stream.FileCharacter).%New()
+			do out.LinkToFile(ini)
+			for i=1:1:lines {
+				do out.WriteLine(lines(i))
+				if $zconvert($zstrip(lines(i),"<>W"),"U")="[APP_PATH_INDEX]" do out.WriteLine(restApp_"=Enabled")
+			}
+			do out.WriteLine("[APP_PATH:"_restApp_"]")
+			do out.WriteLine("Default_Server="_server)
+			$$$ThrowOnError(out.%Save())
+			do log("[v] Web Gateway: added "_restApp_" -> "_server_" in "_ini_" (backup next to it)")
+		}
+	}
+
+	// Relay = %CSP.WebSocket בתוך /xtafnit
+	set relay = pkg_".Relay"
+	if '##class(%Dictionary.CompiledClass).%ExistsId(relay) { do log("[x] "_relay_" is not compiled") set err = err + 1 }
+	elseif '$classmethod(relay,"%IsA","%CSP.WebSocket") { do log("[x] "_relay_" is not a %CSP.WebSocket") set err = err + 1 }
+	else  { do log("[v] WebSocket: ws(s)://<host>"_cspApp_"/"_relay_".cls") }
+
+	// בדיקה מקצה לקצה: IIS -> CSPms -> IRIS -> /xtafnit-rh (close של קוד שלא קיים מחזיר 200)
+	set http = ##class(%Net.HttpRequest).%New()
+	set http.Server = "127.0.0.1", http.Port = 80, http.Timeout = 15
+	do http.SetHeader("X-RH","1")
+	set http.ContentType = "application/json"
+	do http.EntityBody.Write("{""code"":""000000"",""token"":""-""}")
+	set sc = http.Post(restApp_"/close")
+	if $$$ISERR(sc) {
+		do log("[x] HTTP test failed: "_$system.Status.GetErrorText(sc)) set err = err + 1
+	} else {
+		set code = http.HttpResponse.StatusCode
+		if requireSSL,code=403 { do log("[v] HTTP test: "_restApp_" refused over plain HTTP (403, SSL required) as configured") }
+		elseif code=200 { do log("[v] HTTP test: POST http://127.0.0.1"_restApp_"/close -> 200") }
+		else {
+			set hint = $case(code, 404:"IIS handler or "_restApp_" web application missing (IIS 404 = no handler, IRIS 404 = no web app)", 503:"IRIS license limit or web application disabled", 403:"request blocked (X-RH header / authentication)", :"see IRIS messages.log")
+			do log("[x] HTTP test: "_restApp_"/close -> "_code_" - "_hint) set err = err + 1
+		}
+	}
+	do log("    HTTPS uses the same handlers and WebSocket path (wss://) - nothing extra in IRIS")
+	quit err
+}
+
+ ; ───────────── 5. פרמטרים ─────────────
+
+ ; ^["TAFNIT_PARAMETERS"]xTafnitParams("BaseURLs",host,"helper",page)=1 - מפעיל את הכפתור הצף
+params(hosts,pages) {
+	// הפרמטרים עברו מ-^xTafnit.RemoteHelp ל-xTafnitParams("BaseURLs",host,"helper",...) - העברה חד פעמית
+	if $data(^xTafnit.RemoteHelp) {
+		if hosts="" {
+			do log("[!] Old parameters found in ^xTafnit.RemoteHelp - rerun with hosts to move them to xTafnitParams(""BaseURLs"",host,""helper"")")
+		} else {
+			for i=1:1:$length(hosts,",") {
+				set host = $zstrip($piece(hosts,",",i),"<>W")
+				continue:host=""
+				if $data(^xTafnit.RemoteHelp("AnonymousHelper"))#2 set ^["TAFNIT_PARAMETERS"]xTafnitParams("BaseURLs",host,"helper","ANONYMOUSHELPER") = ^xTafnit.RemoteHelp("AnonymousHelper")
+				merge ^["TAFNIT_PARAMETERS"]xTafnitParams("BaseURLs",host,"helper","HELPERS") = ^xTafnit.RemoteHelp("Helpers")
+				do log("[v] Moved ^xTafnit.RemoteHelp parameters to "_host)
+			}
+			kill ^xTafnit.RemoteHelp
+		}
+	}
+	if hosts="" {
+		do log("[-] No hosts given. Enable the button per host and page:")
+		do log("    set ^[""TAFNIT_PARAMETERS""]xTafnitParams(""BaseURLs"",""<SERVER_NAME>"",""helper"",""<page class>"")=1")
+		quit 0
+	}
+	for i=1:1:$length(hosts,",") {
+		set host = $zstrip($piece(hosts,",",i),"<>W")
+		continue:host=""
+		for j=1:1:$length(pages,",") {
+			set page = $zstrip($piece(pages,",",j),"<>W")
+			continue:page=""
+			set ^["TAFNIT_PARAMETERS"]xTafnitParams("BaseURLs",host,"helper",page) = 1
+			do log("[v] Button enabled: "_host_" / "_page)
+		}
+	}
+	quit 0
+}
+
+ ; ───────────── כלים ─────────────
+
+appProp(app,prop) {
+	new $namespace
+	set $namespace = "%SYS"
+	if '##class(Security.Applications).Exists(app) quit ""
+	do ##class(Security.Applications).Get(app,.p)
+	quit $get(p(prop))
+}
+
+ ; מריץ תוכנית עם ארגומנטים נפרדים (בלי cmd.exe - אין בעיות מרכאות ורווחים); out = stdout+stderr; מחזיר exit code
+exec(prog,out,args...) {
+	set file = ##class(%File).TempFilename("txt"), out = ""
+	set rc = $zf(-100,"/STDOUT="""_file_""" /STDERR="""_file_"""",prog,args...)
+	if ##class(%File).Exists(file) {
+		set stream = ##class(%Stream.FileCharacter).%New()
+		do stream.LinkToFile(file)
+		while 'stream.AtEnd { set out = out_stream.ReadLine()_$char(10) }
+		kill stream
+		do ##class(%File).Delete(file)
+	}
+	quit rc
+}
+
+trim(text) {
+	quit $extract($translate($zstrip(text,"<>W"),$char(10,13),"  "),1,300)
+}
+
+log(msg) {
+	set n = $increment(%TafnitHelperLog), %TafnitHelperLog(n) = msg
+	if $get(%TafnitHelperEcho) write msg,!
+	quit
+}
+
+head(title) {
+	do log("")
+	do log("== "_title)
+	quit
+}

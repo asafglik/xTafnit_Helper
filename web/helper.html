@@ -1,0 +1,67 @@
+﻿<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>xTafnit – עזרה מרחוק (עוזר)</title>
+<style>
+  :root { --bg:#f3f4f6; --fg:#111827; --bar:#1f2937; --barfg:#fff; --acc:#2563eb; --ok:#16a34a; --err:#dc2626; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#0f172a; --fg:#e5e7eb; --bar:#111827; } }
+  html, body { height:100%; margin:0; }
+  body { display:flex; flex-direction:column; background:var(--bg); color:var(--fg); font:15px/1.4 system-ui, Arial, sans-serif; }
+  header { display:flex; gap:12px; align-items:center; padding:10px 16px; background:var(--bar); color:var(--barfg); }
+  header input { width:9ch; font:700 22px ui-monospace, Consolas, monospace; letter-spacing:6px; text-align:center; direction:ltr; padding:6px 8px; border-radius:8px; border:0; }
+  header button { font:inherit; border:0; border-radius:8px; padding:9px 16px; cursor:pointer; background:var(--acc); color:#fff; }
+  header button.stop { background:var(--err); display:none; }
+  #status { margin-inline-start:auto; opacity:.9; }
+  #status.error { color:#fca5a5; }
+  #status.live { color:#86efac; }
+  main { flex:1; min-height:0; }
+  #screen { width:100%; height:100%; }
+  .hint { display:flex; height:100%; align-items:center; justify-content:center; opacity:.6; }
+</style>
+</head>
+<body>
+<header>
+  <label for="code">קוד מהמשתמש:</label>
+  <input id="code" inputmode="numeric" maxlength="6" placeholder="000000" autocomplete="off">
+  <button id="go">התחבר</button>
+  <button id="stop" class="stop">סיים</button>
+  <span id="status"></span>
+</header>
+<main><div id="screen"><div class="hint">הקלד את הקוד בן 6 הספרות שמופיע אצל המשתמש</div></div></main>
+
+<script>
+  // התאם לנתיבים אצלך לפני טעינת הסקריפט
+  window.XRH_CONFIG = { api: '/xtafnit-rh', ws: '/xtafnit/TafnitCore.System.UI.App.Tools.Helper.Relay.cls' };
+</script>
+<script src="scripts/xtafnit-rh.js"></script>
+<script>
+  const $ = id => document.getElementById(id);
+  const status = (cls, txt) => { $('status').className = cls || ''; $('status').textContent = txt || ''; };
+
+  $('code').addEventListener('input', e => { e.target.value = e.target.value.replace(/\D/g, '').slice(0, 6); });
+  $('code').addEventListener('keydown', e => { if (e.key === 'Enter') $('go').click(); });
+
+  $('go').onclick = async () => {
+    const code = $('code').value;
+    if (code.length !== 6) return status('error', 'יש להקליד 6 ספרות');
+    status('', 'מתחבר…');
+    const ok = await XRH.helper.start(code, $('screen'), (state, msg) => {
+      if (state === 'error') status('error', msg);
+      else if (state === 'live' || state === 'control' || state === 'view') status('live', msg || 'מחובר');
+      else status('', msg);
+      if (state === 'closed') { $('stop').style.display = 'none'; $('go').style.display = ''; }
+    });   // בלי פרטי הזדהות - קוד בלבד (TafnitCore.System.UI.App.Tools.Helper.Session.JoinAnonymous)
+    if (ok) { $('stop').style.display = ''; $('go').style.display = 'none'; }
+  };
+
+  $('stop').onclick = () => {
+    XRH.helper.stop();
+    $('stop').style.display = 'none'; $('go').style.display = '';
+    $('screen').innerHTML = '<div class="hint">הסשן הסתיים</div>';
+    status('', '');
+  };
+</script>
+</body>
+</html>
