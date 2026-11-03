@@ -14,6 +14,8 @@
     ws: '/xtafnit/TafnitCore.System.UI.App.Tools.Helper.Relay.cls',         // Web App של ה-WebSocket
     snapDelay: 350,                                      // debounce לתמונת מצב (ms)
     chunk: 16000,                                        // גודל frame (תווי base64)
+    frameDepth: 3,                                       // כמה רמות של iframe (מאותו origin) משוקפות - למשל pdfViewer
+    canvasQuality: 0.7,                                  // איכות JPEG של canvas משוקף (עמודי PDF)
     // כפתור "עזרה מרחוק" - נתפס בדפדפן, ללא תלות בפריימוורק (Name="btnRemoteHelp" במסך ה-Login)
     startSelector: '[id*="btnRemoteHelp"],[name*="btnRemoteHelp"],[data-xrh-start]'
   }, w.XRH_CONFIG || {});
@@ -33,6 +35,19 @@
   const wsAuth = (ws, code, token) => ws.send(JSON.stringify({ k: 'auth', code: code, t: token }));
 
   function b64(u8) { let s = ''; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(s); }
+  const BLANK = 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==';
+
+  /** חיפוש אלמנט לפי data-rhid במסמך ובכל ה-iframes מאותו origin שבתוכו */
+  function findById(doc, id, depth) {
+    const e = doc.querySelector('[data-rhid="' + id + '"]'); if (e) return e;
+    if (depth >= CFG.frameDepth) return null;
+    for (const f of doc.querySelectorAll('iframe,frame')) {
+      let d = null; try { d = f.contentDocument; } catch (_) { }
+      const r = d && d.documentElement ? findById(d, id, depth + 1) : null; if (r) return r;
+    }
+    return null;
+  }
+
   function unb64(b) { const s = atob(b), u = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) u[i] = s.charCodeAt(i); return u; }
   async function pipe(u8, stream) { const wr = stream.writable.getWriter(); wr.write(u8); wr.close(); return new Uint8Array(await new Response(stream.readable).arrayBuffer()); }
 
@@ -241,14 +256,32 @@
     async snap(force) {
       if (this.checkLogin()) return;                  // בדיקה סינכרונית - אין מרוץ מול זיהוי הכניסה
       if (!this.consent || !this.ws || this.ws.readyState !== 1) return;
-      const all = document.querySelectorAll('*');
-      all.forEach(e => { if (!e.hasAttribute('data-rhid')) e.setAttribute('data-rhid', ++this.tag); });
+      const sc = [];
+      const html = '<!DOCTYPE html>' + this.serialize(document, 0, sc);
+      this.watchFrames(document, 0);
+      // גם גלילה בלבד (בדף או בתוך iframe) היא שינוי שצריך לשלוח
+      const key = html + '|' + scrollX + ',' + scrollY + '|' + JSON.stringify(sc);
+      if (!force && key === this.last) return; this.last = key;
 
-      const clone = document.documentElement.cloneNode(true);
+      sendBig(this.ws, this.st, {
+        t: 'snap', seq: ++this.seq, html, base: document.baseURI, title: document.title,
+        vw: innerWidth, vh: innerHeight, sx: scrollX, sy: scrollY, sc
+      });
+    },
+
+    /** עותק של מסמך (ושל ה-iframes מאותו origin שבתוכו, עד FRAMEDEPTH רמות) כ-HTML.
+     *  sc = מיקומי גלילה מכל המסמכים (data-rhid ייחודי לכל המסמכים - מונה משותף) */
+    serialize(doc, depth, sc) {
+      const root = doc.documentElement, keep = e => !e.closest('[data-rh-ignore]');
+      const all = [root, ...root.querySelectorAll('*')];
+      all.forEach(e => { if (!e.hasAttribute('data-rhid')) e.setAttribute('data-rhid', ++this.tag); });
+      all.forEach(e => { if ((e.scrollTop || e.scrollLeft) && keep(e)) sc.push({ id: +e.getAttribute('data-rhid'), t: e.scrollTop, l: e.scrollLeft }); });
+
+      const clone = root.cloneNode(true);
       clone.querySelectorAll('[data-rh-ignore]').forEach(e => e.remove());
 
       // מצב טפסים (value לא מופיע ב-outerHTML)
-      const live = [...document.documentElement.querySelectorAll('input,textarea,select')].filter(e => !e.closest('[data-rh-ignore]'));
+      const live = [...root.querySelectorAll('input,textarea,select')].filter(keep);
       const copy = clone.querySelectorAll('input,textarea,select');
       live.forEach((el, i) => {
         const c = copy[i]; if (!c) return; const t = (el.type || '').toLowerCase();
@@ -258,25 +291,73 @@
         else if (t === 'checkbox' || t === 'radio') el.checked ? c.setAttribute('checked', '') : c.removeAttribute('checked');
         else c.setAttribute('value', el.value);
       });
+
+      // canvas (למשל עמודי PDF ב-pdfViewer) - כתמונה; רק מה שנראה על המסך, השאר ריק
+      const liveC = [...root.querySelectorAll('canvas')].filter(keep), copyC = clone.querySelectorAll('canvas');
+      liveC.forEach((cv, i) => {
+        const c = copyC[i]; if (!c) return;
+        const img = doc.createElement('img');
+        [...c.attributes].forEach(a => img.setAttribute(a.name, a.value));
+        if (!cv.style.width) img.style.width = cv.clientWidth + 'px';
+        if (!cv.style.height) img.style.height = cv.clientHeight + 'px';
+        img.setAttribute('src', cv.closest('[data-rh-mask],[data-rh-block]') ? BLANK : this.canvasUrl(cv));
+        c.replaceWith(img);
+      });
+
+      // iframes מאותו origin (pdfViewer, iframe של xTafnit) - התוכן נכנס כ-srcdoc; iframe מ-origin אחר נשאר כמו שהוא
+      const liveF = [...root.querySelectorAll('iframe,frame')].filter(keep), copyF = clone.querySelectorAll('iframe,frame');
+      liveF.forEach((f, i) => {
+        const c = copyF[i]; if (!c || depth >= CFG.frameDepth || f.closest('[data-rh-block]')) return;
+        let inner = null; try { inner = f.contentDocument; } catch (_) { }
+        if (!inner || !inner.documentElement) return;
+        let h; try { h = this.serialize(inner, depth + 1, sc); } catch (_) { return; }
+        c.removeAttribute('src');
+        c.setAttribute('srcdoc', '<!DOCTYPE html>' + h);
+      });
+
       clone.querySelectorAll('script,noscript').forEach(s => { s.textContent = ''; s.removeAttribute('src'); });
       clone.querySelectorAll('[data-rh-block]').forEach(e => { e.innerHTML = ''; });
 
-      const html = '<!DOCTYPE html>' + clone.outerHTML;
-      if (!force && html === this.last) return; this.last = html;
+      // ב-iframe: base לכתובת המקורית, כדי ש-CSS ותמונות ייטענו אצל העוזר
+      if (depth > 0) {
+        const head = clone.querySelector('head');
+        if (head) { const b = doc.createElement('base'); b.setAttribute('href', doc.baseURI); head.insertBefore(b, head.firstChild); }
+      }
+      return clone.outerHTML;
+    },
 
-      const sc = [...all].filter(e => (e.scrollTop || e.scrollLeft) && !e.closest('[data-rh-ignore]'))
-        .map(e => ({ id: +e.getAttribute('data-rhid'), t: e.scrollTop, l: e.scrollLeft }));
+    /** canvas -> JPEG (מטמון קצר; canvas שלא על המסך נשלח ריק כדי לחסוך תעבורה) */
+    canvasUrl(cv) {
+      if (!cv.width || !cv.height) return BLANK;
+      const r = cv.getBoundingClientRect(), win = cv.ownerDocument.defaultView;
+      if (r.bottom < 0 || r.right < 0 || r.top > win.innerHeight || r.left > win.innerWidth) return BLANK;
+      const cache = this.cvCache || (this.cvCache = new WeakMap()), e = cache.get(cv), now = Date.now();
+      if (e && e.w === cv.width && e.h === cv.height && now - e.t < 1500) return e.u;
+      let u = BLANK;
+      try { u = cv.toDataURL('image/jpeg', CFG.canvasQuality); } catch (_) { }      // canvas "מזוהם" (תוכן מ-origin אחר) - נשאר ריק
+      cache.set(cv, { w: cv.width, h: cv.height, t: now, u });
+      return u;
+    },
 
-      sendBig(this.ws, this.st, {
-        t: 'snap', seq: ++this.seq, html, base: document.baseURI, title: document.title,
-        vw: innerWidth, vh: innerHeight, sx: scrollX, sy: scrollY, sc
+    /** שינויים וגלילה בתוך iframes מאותו origin גם מפעילים תמונת מצב */
+    watchFrames(doc, depth) {
+      if (!this.obs || depth >= CFG.frameDepth) return;
+      const seen = this.watched || (this.watched = new WeakSet());
+      doc.querySelectorAll('iframe,frame').forEach(f => {
+        if (!seen.has(f)) { seen.add(f); f.addEventListener('load', () => this.sched()); }
+        let inner = null; try { inner = f.contentDocument; } catch (_) { }
+        if (!inner || !inner.documentElement || seen.has(inner)) return;
+        seen.add(inner);
+        this.obs.observe(inner.documentElement, { childList: true, subtree: true, attributes: true, characterData: true });
+        ['input', 'change', 'scroll', 'resize'].forEach(t => inner.defaultView.addEventListener(t, this.onUi, true));
+        this.watchFrames(inner, depth + 1);
       });
     },
 
     /* ─── הפעלת קלט של העוזר ─── */
     apply(m) {
       if (!this.control || !this.consent) return;           // הגנה נוספת בצד הלקוח
-      const el = m.id ? document.querySelector('[data-rhid="' + (+m.id) + '"]') : null;
+      const el = m.id ? findById(document, +m.id, 0) : null;
       if (el && el.closest('[data-rh-ignore],[data-rh-block]')) return;
       if (el && el.type === 'password') return;
 
@@ -289,7 +370,7 @@
         case 'click':
           if (!el || el.disabled) break;
           if (el.focus) el.focus({ preventScroll: true });
-          ['mousedown', 'mouseup', 'click'].forEach(n => el.dispatchEvent(new MouseEvent(n, { bubbles: true, cancelable: true, view: window, clientX: +m.x, clientY: +m.y })));
+          ['mousedown', 'mouseup', 'click'].forEach(n => el.dispatchEvent(new MouseEvent(n, { bubbles: true, cancelable: true, view: el.ownerDocument.defaultView, clientX: +m.x, clientY: +m.y })));
           break;
         case 'input': {
           if (!el || el.disabled || el.readOnly) break;
@@ -398,12 +479,28 @@
       doc.replaceChild(doc.importNode(d.documentElement, true), doc.documentElement);
 
       if (fid) { const e = doc.querySelector('[data-rhid="' + fid + '"]'); if (e) { e.focus({ preventScroll: true }); try { e.setSelectionRange(ss, se); } catch (_) { } } }
-      (m.sc || []).forEach(s => { const e = doc.querySelector('[data-rhid="' + s.id + '"]'); if (e) { e.scrollTop = s.t; e.scrollLeft = s.l; } });
+
+      // גלילה - גם בתוך iframes משוקפים (srcdoc נטען אחרי ההחלפה, לכן שוב ב-load של כל iframe)
+      const applyScroll = () => {
+        this.mute = Date.now() + 300;
+        (m.sc || []).forEach(s => { const e = findById(doc, s.id, 0); if (e) { e.scrollTop = s.t; e.scrollLeft = s.l; } });
+      };
+      const bound = this.boundDocs || (this.boundDocs = new WeakSet());
+      const hook = (d, depth) => d.querySelectorAll('iframe,frame').forEach(f => f.addEventListener('load', () => {
+        let nd = null; try { nd = f.contentDocument; } catch (_) { }
+        if (!nd || !nd.documentElement) return;
+        if (!bound.has(nd)) { bound.add(nd); this.bindInput(nd, true); }
+        applyScroll();
+        if (depth + 1 < CFG.frameDepth) hook(nd, depth + 1);
+      }));
+      hook(doc, 0);
+      applyScroll();
       doc.defaultView.scrollTo(m.sx, m.sy);
       this.onState('live', m.title || '');
     },
 
-    bindInput(doc) {
+    /** nested = מסמך של iframe משוקף: גלילת השורש וסמן העכבר לא נשלחים (הקואורדינטות יחסיות ל-iframe) */
+    bindInput(doc, nested) {
       const idOf = t => { const e = t && t.closest ? t.closest('[data-rhid]') : null; return e ? +e.getAttribute('data-rhid') : null; };
       const textual = t => /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName) && !/^(checkbox|radio|button|submit|reset)$/.test(t.type || '');
 
@@ -425,10 +522,11 @@
       doc.addEventListener('scroll', ev => {
         if (Date.now() < this.mute) return;
         const t = ev.target;
-        if (t === doc) this.send({ e: 'scroll', x: doc.defaultView.scrollX, y: doc.defaultView.scrollY });
+        if (t === doc) { if (!nested) this.send({ e: 'scroll', x: doc.defaultView.scrollX, y: doc.defaultView.scrollY }); }
         else if (t.getAttribute) this.send({ e: 'scroll', id: idOf(t), x: t.scrollLeft, y: t.scrollTop });
       }, true);
 
+      if (nested) return;
       let lt = 0;
       doc.addEventListener('mousemove', ev => { const n = Date.now(); if (n - lt < 80) return; lt = n; this.send({ e: 'mv', x: ev.clientX, y: ev.clientY }); }, true);
     }
