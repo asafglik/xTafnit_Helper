@@ -36,6 +36,11 @@ Parameter HELPERIPS;
 /// נלקח הערך האחרון (הימני) בכותרת - זה שה-proxy עצמו הוסיף; הערכים שלפניו נשלטים ע"י הלקוח.
 Parameter TRUSTPROXY = 0;
 
+/// 1 = עזרה מרחוק רק ב-HTTPS: קוד לא נוצר ועוזר לא מצטרף בחיבור לא מוצפן
+/// (הטוקנים ותוכן המסך עוברים בחיבור הזה). 0 = לאפשר גם HTTP, למשל בסביבת בדיקות.
+/// מאחורי proxy שמסיים TLS: TRUSTPROXY=1 וה-proxy שולח X-Forwarded-Proto: https
+Parameter REQUIREHTTPS = 1;
+
 /// מה קורה כשמשתמש שביקש עזרה ממסך ה-login מתחבר למערכת:
 ///   reconsent - העוזר מאבד גישה (צפייה ושליטה) עד שהמשתמש מאשר שוב  [ברירת מחדל]
 ///   end       - הסשן מסתיים אוטומטית
@@ -140,6 +145,21 @@ ClassMethod ResolveIP(pRemote As %String, pForwarded As %String, pHost As %Strin
     quit tFwd
 }
 
+/// האם הבקשה הנוכחית הגיעה ב-HTTPS
+ClassMethod IsSecure(pHost As %String = "") As %Boolean
+{
+    if '$ISOBJECT($GET(%request)) quit 0
+    quit ..ResolveSecure(%request.Secure,$GET(%request.CgiEnvs("HTTP_X_FORWARDED_PROTO")),pHost)
+}
+
+/// HTTPS ישיר, או (עם TRUSTPROXY) X-Forwarded-Proto: https מה-proxy
+ClassMethod ResolveSecure(pSecure As %Boolean, pProto As %String, pHost As %String = "") As %Boolean
+{
+    if pSecure quit 1
+    if '..Param("TRUSTPROXY",pHost) quit 0
+    quit $ZCONVERT($ZSTRIP($PIECE(pProto,",",*),"<>W"),"L")="https"
+}
+
 ClassMethod IPAllowed(pIP As %String, pHost As %String = "") As %Boolean
 {
     set tList=..Param("HELPERIPS",pHost)
@@ -213,6 +233,12 @@ ClassMethod Create(Output pCode As %String, Output pToken As %String, Output pSc
             do ..Audit("CreateDenied","host="_tHost_" ip="_tIP)
             throw ##class(%Exception.StatusException).CreateFromStatus($$$ERROR($$$GeneralError,"host not configured"))
         }
+        if ..Param("REQUIREHTTPS",tHost)&&'..IsSecure(tHost) {
+            do ..Audit("CreateDenied","https required host="_tHost_" ip="_tIP)
+            throw ##class(%Exception.StatusException).CreateFromStatus($$$ERROR($$$GeneralError,"https required"))
+        }
+        // ניקוי תקופתי של סשנים ומונים ישנים - לא מפיל את יצירת הקוד
+        try { do ..Purge() } catch {}
         if '..CreateAllowed(tIP) {
             do ..Audit("CreateThrottled","ip="_tIP)
             throw ##class(%Exception.StatusException).CreateFromStatus($$$ERROR($$$GeneralError,"too many requests"))
@@ -322,6 +348,7 @@ ClassMethod DoJoin(pCode As %String, pHelperName As %String, pMode As %String, O
         if (pMode="anonymous")&&'..Param("ANONYMOUSHELPER",tHost) set tDenied="JoinDenied"
         if (tDenied="")&&(pMode="xtafnit")&&$DATA(^["TAFNIT_PARAMETERS"]xTafnitParams("BaseURLs",tHost,"helper","HELPERS"))&&'$DATA(^["TAFNIT_PARAMETERS"]xTafnitParams("BaseURLs",tHost,"helper","HELPERS",$ZCONVERT(pHelperName,"U"))) set tDenied="JoinDenied"
         if (tDenied="")&&'..IPAllowed(tIP,tHost) set tDenied="JoinDeniedIP"
+        if (tDenied="")&&..Param("REQUIREHTTPS",tHost)&&'..IsSecure(tHost) set tDenied="JoinDeniedHTTP"
         if tDenied'="" {
             // נספר כניסיון שגוי - כדי שהתשובה לא תשמש לבדיקה אם קוד קיים
             do ..RegisterFail(tReqKey)
@@ -347,6 +374,7 @@ ClassMethod DoJoin(pCode As %String, pHelperName As %String, pMode As %String, O
 
         set ^IRIS.Temp.xTafnitRH("s",tObj.Code)=tObj.ExpiresSec
         kill ^IRIS.Temp.xTafnitRH("fail",tReqKey),^IRIS.Temp.xTafnitRH("fail",tKey)
+        kill ^IRIS.Temp.xTafnitRH("failt",tReqKey),^IRIS.Temp.xTafnitRH("failt",tKey)
 
         do ..Enqueue(tObj.Code,"user",{"k":"m","t":"joined","helper":(tHelper)}.%ToJSON())
         do ..Audit("Join","scope="_tObj.Scope_" user="_tObj.UserName_" helper="_tHelper_" ip="_tIP_" host="_tHost)
@@ -404,10 +432,47 @@ ClassMethod IsLocked(pKey As %String) As %Boolean
 ClassMethod RegisterFail(pKey As %String)
 {
     set n=$INCREMENT(^IRIS.Temp.xTafnitRH("fail",pKey))
+    set ^IRIS.Temp.xTafnitRH("failt",pKey)=..NowSec()
     if n>=..Param("MAXFAILS") {
         set ^IRIS.Temp.xTafnitRH("lock",pKey)=..NowSec()+..Param("LOCKSECS")
-        kill ^IRIS.Temp.xTafnitRH("fail",pKey)
+        kill ^IRIS.Temp.xTafnitRH("fail",pKey),^IRIS.Temp.xTafnitRH("failt",pKey)
     }
+}
+
+/// ניקוי: סשנים שפג תוקפם (כולל התורים שלהם), ומוני יצירה / ניסיונות / חסימות שפגו.
+/// סשן שנסגר נמחק כשפג תוקפו המקורי - כך הודעת הסיום מספיקה להגיע לשני הצדדים.
+/// רץ מתוך Create לכל היותר פעם ב-10 דקות (pForce=1 - מיד), כך ש-IRISTEMP לא מתמלא עד הפעלה מחדש.
+ClassMethod Purge(pForce As %Boolean = 0)
+{
+    set tNow=..NowSec()
+    if 'pForce,$GET(^IRIS.Temp.xTafnitRH("purge"))>tNow quit
+    set ^IRIS.Temp.xTafnitRH("purge")=tNow+600
+
+    set (tID,tCode)="", tCut=tNow-60
+    &sql(DECLARE RHP1 CURSOR FOR SELECT ID, Code INTO :tID, :tCode FROM TafnitCore_System_UI_App_Tools_Helper.Session
+         WHERE ExpiresSec < :tCut)
+    &sql(OPEN RHP1)
+    for { &sql(FETCH RHP1) quit:SQLCODE  set tDel(tID)=tCode }
+    &sql(CLOSE RHP1)
+    set tID=""
+    for {
+        set tID=$ORDER(tDel(tID),1,tCode) quit:tID=""
+        do ..%DeleteId(tID)
+        // הקוד יכול היה להיות מוקצה מחדש לסשן חי - את התורים שלו לא מוחקים
+        if (tCode'="")&&'..ActiveCodeExists(tCode) {
+            kill ^IRIS.Temp.xTafnitRH("q",tCode),^IRIS.Temp.xTafnitRH("s",tCode),^IRIS.Temp.xTafnitRH("conn",tCode),^IRIS.Temp.xTafnitRH("closed",tCode)
+            kill ^IRIS.Temp.xTafnitRH("view",tCode),^IRIS.Temp.xTafnitRH("ctl",tCode),^IRIS.Temp.xTafnitRH("seq",tCode)
+        }
+    }
+
+    set k=""
+    for { set k=$ORDER(^IRIS.Temp.xTafnitRH("cr",k),1,d) quit:k=""  if $LIST(d,1)<tNow kill ^IRIS.Temp.xTafnitRH("cr",k) }
+    set k=""
+    for { set k=$ORDER(^IRIS.Temp.xTafnitRH("lock",k),1,d) quit:k=""  if d<tNow kill ^IRIS.Temp.xTafnitRH("lock",k) }
+    set k=""
+    for { set k=$ORDER(^IRIS.Temp.xTafnitRH("failt",k),1,d) quit:k=""  if (tNow-d)>3600 kill ^IRIS.Temp.xTafnitRH("failt",k),^IRIS.Temp.xTafnitRH("fail",k) }
+    set k=""
+    for { set k=$ORDER(^IRIS.Temp.xTafnitRH("pend",k),1,d) quit:k=""  if (tNow-d)>60 kill ^IRIS.Temp.xTafnitRH("pend",k) }
 }
 
 /// אודיט IRIS - יש להפעיל את אירועי xTafnit/RemoteHelp/* ב-Management Portal

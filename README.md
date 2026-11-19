@@ -29,9 +29,9 @@ sequenceDiagram
 ```
 
 1. **קוד:** `Session` יוצר קוד וטוקן סודי; נשמר רק hash של הטוקן, ב-IRISTEMP.
-2. **חיבור:** כל צד פותח WebSocket ל-`/xtafnit/...Relay.cls`. הקוד והטוקן נשלחים בהודעה הראשונה – לא ב-URL, כדי שלא יירשמו בלוגים של IIS. בלי אימות תוך 10 שניות השרת מנתק.
+2. **חיבור:** כל צד פותח WebSocket ל-`/xtafnit/...Relay.cls`. הקוד והטוקן נשלחים בהודעה הראשונה – לא ב-URL, כדי שלא יירשמו בלוגים של IIS. בלי אימות תוך 5 שניות השרת מנתק.
 3. **אישור:** המשתמש בוחר צפייה בלבד / צפייה ושליטה / דחייה. ההרשאה נאכפת בשרת.
-4. **שיקוף:** אחרי כל שינוי או גלילה (MutationObserver, השהייה של 350ms) הדף מועתק, סקריפטים מוסרים, סיסמאות ושדות `data-rh-mask` מרוקנים, ונשלחים ערכי טפסים ומיקומי גלילה. iframes מאותו origin (למשל `pdfViewer`) נכנסים לעותק כ-`srcdoc`, עד 3 רמות, ו-canvas שנראה על המסך (למשל עמוד PDF) נשלח כתמונת JPEG. אצל העוזר העותק מוצג ב-iframe בלי הרשאה להריץ סקריפטים.
+4. **שיקוף:** אחרי כל שינוי או גלילה (MutationObserver, השהייה של 350ms) הדף מועתק, סקריפטים מוסרים, סיסמאות, שדות `hidden` ושדות `data-rh-mask` מרוקנים, ונשלחים ערכי טפסים ומיקומי גלילה. iframes מאותו origin (למשל `pdfViewer`) נכנסים לעותק כ-`srcdoc`, עד 3 רמות, ו-canvas שנראה על המסך (למשל עמוד PDF) נשלח כתמונת JPEG. אצל העוזר העותק מוצג ב-iframe בלי הרשאה להריץ סקריפטים.
 5. **שליטה:** אירועי העוזר נשלחים עם מזהה האלמנט (`data-rhid`) ומופעלים על הדף האמיתי. לשדה סיסמה העוזר לא יכול להקליד.
 6. **סיום:** "סיים" מכל צד, תפוגה (`MAXSESSION`), או מדיניות כניסה למערכת (`LOGINPOLICY`).
 
@@ -77,7 +77,7 @@ sequenceDiagram
 | עוזר חיצוני (`helper.html`) או מחובר (`HelperPage`) | אפליקציה עטופה (Cordova / WebView) – דורשת כתובת שרת מלאה ב-`XRH_CONFIG` ו-CORS |
 | reverse proxy (עם `TRUSTPROXY=1` והעברת `Upgrade` / `Connection`) | במעבר אפליקציה / נעילת מסך במובייל החיבור נקטע ומתחבר מחדש בחזרה |
 
-נבדק בפועל: מחשב, HTTP, כולל ההתקנה האוטומטית. HTTPS ומובייל – לפי היכולות שהקוד משתמש בהן, לא נבדקו במכשיר.
+נבדק בפועל: מחשב, HTTP (היום דורש `REQUIREHTTPS=0` לכתובת), כולל ההתקנה האוטומטית. HTTPS ומובייל – לפי היכולות שהקוד משתמש בהן, לא נבדקו במכשיר.
 
 ## התקנה
 
@@ -94,6 +94,8 @@ do $system.OBJ.LoadDir("C:\gitRepository\xTafnit_Helper\src","ck",,1)
 - הרצה ידנית: `do install^core.TafnitHelperUtils()`
 - עם HTTPS: `do install^core.TafnitHelperUtils("","",,1,,,"<THUMBPRINT>")` – יוצר binding של 443 עם התעודה (`LocalMachine\My`).
 - ביטול ההפעלה האוטומטית: `set ^TafnitHelper("AutoInstall")=0`
+- התקנה חוזרת רק מקשיחה: היא לא מבטלת `sslFlags` שהוגדר, ולא מפעילה מחדש Web Application שהושבת.
+- `/xtafnit-rh` מותקן עם Unauthenticated בלבד. HTTP Basic בבקשת `join` (משאב `xTafnit_RemoteSupport`): `set ^TafnitHelper("BasicAuth")=1` והתקנה מחדש.
 - **עורך פתוח:** אם המחלקות פתוחות ב-Studio / VS Code, הקומפילציה נכשלת (`ERROR #5864`) – לסגור לפני ההתקנה.
 
 פרמטרים של `install^core.TafnitHelperUtils` (כולם אופציונליים):
@@ -107,7 +109,7 @@ do $system.OBJ.LoadDir("C:\gitRepository\xTafnit_Helper\src","ck",,1)
 | `site` | `Default Web Site` | אתר ה-IIS |
 | `webRoot` | `C:\inetpub\wwwroot\` | תיקיית השורש של האתר |
 | `httpsCert` | ריק | thumbprint של תעודה – binding של `https:443` |
-| `requireSSL` | 0 | 1 = `/xtafnit-rh` ו-`helper.html` רק ב-HTTPS |
+| `requireSSL` | 0 | 1 = `/xtafnit-rh` ו-`helper.html` רק ב-HTTPS גם ברמת IIS. 0 = ההגדרה הקיימת לא משתנה (התקנה חוזרת לא מבטלת הקשחה) |
 
 ## הפעלת הכפתור למסכים
 
@@ -134,12 +136,13 @@ set ^["TAFNIT_PARAMETERS"]xTafnitParams("BaseURLs","erp.example.co.il","helper",
 | `MAXSESSION` | 3600 | משך סשן פעיל בשניות |
 | `MAXFAILS` / `LOCKSECS` | 5 / 900 | ניסיונות שגויים עד חסימה / משך החסימה |
 | `MAXCREATES` | 5 | קודים מאותו IP ב-10 דקות |
+| `REQUIREHTTPS` | 1 | 1 = קוד נוצר ועוזר מצטרף רק ב-HTTPS. 0 = גם HTTP (סביבת בדיקות). מאחורי proxy שמסיים TLS: `TRUSTPROXY=1` ו-`X-Forwarded-Proto: https` |
 | `LOGINPOLICY` | `reconsent` | אחרי כניסה למערכת: `reconsent` / `end` / `continue` |
 
 ## אבטחת מידע
 
-- **טופל:** פרמטרי האבטחה נקראים לפי הכתובת שבה נוצר הקוד ולא לפי כותרת `Host` של העוזר; הצטרפות בלי הזדהות כבויה כברירת מחדל; העותק אצל העוזר מוצג עם CSP (משאבים רק מהשרת עצמו, בלי frames מכתובת, בלי `meta refresh`) ועם תקרת גודל; הטוקן לא נכנס ל-URL; ל-`/xtafnit-rh` יש role `xTafnitRemoteHelp` עם קריאה בלבד והסשנים ב-IRISTEMP; נשמר רק hash של טוקנים; הגנת CSRF בכותרת `X-RH`; סיסמאות לא נשלחות לעוזר; העותק מוצג אצל העוזר בלי סקריפטים; השליטה דורשת אישור והמשתמש יכול לבטל בכל רגע.
-- **מומלץ בייצור:** HTTPS (`httpsCert`, אפשר `requireSSL`); `HELPERIPS` והגבלת IP ב-IIS לרשת התמיכה; `ANONYMOUSHELPER=1` רק אם חייבים עוזר חיצוני, ורק יחד עם `HELPERIPS`; bindings ב-IIS עם שם host מפורש; Dynamic IP Restrictions ב-IIS על `xtafnit-rh` (מיצוי רישיונות); הפעלת אירועי האודיט `xTafnit/RemoteHelp/*`; סימון שדות רגישים ב-`data-rh-mask`.
+- **טופל:** HTTPS נדרש כברירת מחדל (`REQUIREHTTPS`); שדות `hidden`, מזהי סשן של CSP בכתובות ושדות סיסמה (גם אחרי "הצג סיסמה") לא נשלחים לעוזר; הזדהות Password על ה-REST כבויה; הגבלת חיבורים לא מאומתים, נפח הודעות ועומק תור ב-Relay, וניקוי תקופתי של IRISTEMP; פרמטרי האבטחה נקראים לפי הכתובת שבה נוצר הקוד ולא לפי כותרת `Host` של העוזר; הצטרפות בלי הזדהות כבויה כברירת מחדל; העותק אצל העוזר מוצג עם CSP (משאבים רק מהשרת עצמו, בלי frames מכתובת, בלי `meta refresh`) ועם תקרת גודל; הטוקן לא נכנס ל-URL; ל-`/xtafnit-rh` יש role `xTafnitRemoteHelp` עם קריאה בלבד והסשנים ב-IRISTEMP; נשמר רק hash של טוקנים; הגנת CSRF בכותרת `X-RH`; סיסמאות לא נשלחות לעוזר; העותק מוצג אצל העוזר בלי סקריפטים; השליטה דורשת אישור והמשתמש יכול לבטל בכל רגע.
+- **מומלץ בייצור:** תעודה ל-HTTPS (`httpsCert`, אפשר גם `requireSSL`); `HELPERIPS` והגבלת IP ב-IIS לרשת התמיכה; `ANONYMOUSHELPER=1` רק אם חייבים עוזר חיצוני, ורק יחד עם `HELPERIPS`; bindings ב-IIS עם שם host מפורש; Dynamic IP Restrictions ב-IIS על `xtafnit-rh` (מיצוי רישיונות); הפעלת אירועי האודיט `xTafnit/RemoteHelp/*`; סימון שדות רגישים ב-`data-rh-mask`.
 - **לתשומת לב:** `commonXTafPage` היא מחלקת ליבה – השינוי צריך להיכנס לפריימוורק, אחרת יידרס בעדכון.
 
 ## פיתוח

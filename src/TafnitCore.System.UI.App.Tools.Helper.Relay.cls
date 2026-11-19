@@ -8,7 +8,17 @@ Class TafnitCore.System.UI.App.Tools.Helper.Relay Extends %CSP.WebSocket
 {
 
 /// כמה שניות לחכות להודעת האימות לפני ניתוק
-Parameter AUTHTIMEOUT = 10;
+Parameter AUTHTIMEOUT = 5;
+
+/// כמה חיבורים יכולים לחכות לאימות בו-זמנית. כל חיבור כזה תופס תהליך ורישיון של IRIS,
+/// ולכן מעבר לזה חיבור חדש נסגר מיד (הדפדפן מנסה שוב אחרי 2 שניות).
+Parameter MAXPENDING = 30;
+
+/// תקרת הודעות שמחכות בתור של הצד השני (צד שלא קורא) - מעבר לזה הודעות נזרקות
+Parameter MAXQUEUE = 2000;
+
+/// תקרת נפח (תווים) שחיבור אחד יכול לשלוח בחלון של 10 שניות - מעבר לזה הודעות נזרקות
+Parameter MAXBYTES = 50000000;
 
 Property Code As %String;
 
@@ -23,8 +33,20 @@ Property Remote As %String(MAXLEN = 64);
 
 Property Forwarded As %String(MAXLEN = 2000);
 
+/// האם החיבור הגיע ב-HTTPS (wss), ו-X-Forwarded-Proto - נשמרים ב-OnPreServer
+Property Secure As %Boolean [ InitialExpression = 0 ];
+
+Property Proto As %String(MAXLEN = 64);
+
+/// מונה הנפח של החלון הנוכחי (MAXBYTES)
+Property WinStart As %Numeric [ InitialExpression = 0 ];
+
+Property WinBytes As %Numeric [ InitialExpression = 0 ];
+
 Method OnPreServer() As %Status
 {
+    set ..Secure=''%request.Secure
+    set ..Proto=$EXTRACT($GET(%request.CgiEnvs("HTTP_X_FORWARDED_PROTO")),*-63,*)
     set ..Remote=$EXTRACT($GET(%request.CgiEnvs("REMOTE_ADDR")),1,64)
     set ..Forwarded=$EXTRACT($GET(%request.CgiEnvs("HTTP_X_FORWARDED_FOR")),*-1999,*)
     quit $$$OK
@@ -43,6 +65,7 @@ Method Authenticate(pData As %String) As %String
     set tRole=tObj.RoleOf(tIn.t)
     if tRole="" quit ""
     if tObj.Host="" quit ""
+    if ##class(TafnitCore.System.UI.App.Tools.Helper.Session).Param("REQUIREHTTPS",tObj.Host),'##class(TafnitCore.System.UI.App.Tools.Helper.Session).ResolveSecure(..Secure,..Proto,tObj.Host) quit ""
 
     if tRole="helper" {
         if tObj.Status'="Active" quit ""
@@ -56,9 +79,19 @@ Method Authenticate(pData As %String) As %String
 
 Method Server() As %Status
 {
+    // הגבלת חיבורים שמחכים לאימות (רשומה לכל תהליך; רשומה ישנה מ-30 שניות נחשבת מתה)
+    set tNow=##class(TafnitCore.System.UI.App.Tools.Helper.Session).NowSec(), tPend=0, j=""
+    for {
+        set j=$ORDER(^IRIS.Temp.xTafnitRH("pend",j),1,t) quit:j=""
+        if (tNow-t)<30 { set tPend=tPend+1 } else { kill ^IRIS.Temp.xTafnitRH("pend",j) }
+    }
+    if tPend>=..#MAXPENDING quit $$$OK
+    set ^IRIS.Temp.xTafnitRH("pend",$JOB)=tNow
+
     // אימות: ההודעה הראשונה חייבת להיות auth תקין
     set tLen=4000, tSC=$$$OK
     set tData=..Read(.tLen,.tSC,..#AUTHTIMEOUT)
+    kill ^IRIS.Temp.xTafnitRH("pend",$JOB)
     set ..Role=$SELECT($$$ISERR(tSC):"",1:..Authenticate(tData))
     if ..Role="" {
         do ..Write({"k":"m","t":"denied"}.%ToJSON())
@@ -109,6 +142,12 @@ Method Server() As %Status
 
 Method Dispatch(pData As %String)
 {
+    // תקרת נפח לחיבור
+    set tNow=##class(TafnitCore.System.UI.App.Tools.Helper.Session).NowSec()
+    if (tNow-..WinStart)>=10 set ..WinStart=tNow, ..WinBytes=0
+    set ..WinBytes=..WinBytes+$LENGTH(pData)
+    if ..WinBytes>..#MAXBYTES quit
+
     // frames של תמונת מסך - רק מהמשתמש ורק אחרי הסכמה לצפייה
     if $EXTRACT(pData,1,8)="{""k"":""c""" {
         if ..Role'="user" quit
@@ -174,11 +213,15 @@ Method Forward(pData As %String)
 {
     set tPeer=$CASE(..Role,"user":"helper",:"user")
     if '$GET(^IRIS.Temp.xTafnitRH("conn",..Code,tPeer)) quit
+    // הצד השני לא קורא - לא ממלאים את IRISTEMP
+    set tFirst=$ORDER(^IRIS.Temp.xTafnitRH("q",..Code,tPeer,""))
+    if tFirst'="",($GET(^IRIS.Temp.xTafnitRH("seq",..Code))-tFirst)>..#MAXQUEUE quit
     do ##class(TafnitCore.System.UI.App.Tools.Helper.Session).Enqueue(..Code,tPeer,pData)
 }
 
 Method OnPostServer() As %Status
 {
+    kill ^IRIS.Temp.xTafnitRH("pend",$JOB)
     // חיבור שלא עבר אימות - אין מה לנקות
     if (..Code="")||(..Role="") quit $$$OK
     kill ^IRIS.Temp.xTafnitRH("conn",..Code,..Role)

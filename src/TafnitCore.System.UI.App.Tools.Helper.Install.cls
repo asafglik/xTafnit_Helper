@@ -11,7 +11,7 @@ Projection AutoInstall As TafnitCore.System.UI.App.Tools.Helper.AutoInstall;
 
 /// חייב להיות שווה ל-$$version^core.TafnitHelperUtils() - כך ההתקנה ברקע לא תרוץ על גרסה ישנה של הרוטינה
 /// שעוד נמצאת ב-IRIS בזמן ש-LoadDir מקמפל את החדשה
-Parameter VERSION = 2;
+Parameter VERSION = 3;
 
 /// ההתקנה ברקע (JOB). מחכה שכל רכיבי החבילה יקומפלו ואז מריץ את ההתקנה המלאה.
 ClassMethod Background()

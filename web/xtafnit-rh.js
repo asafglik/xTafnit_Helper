@@ -304,7 +304,7 @@
       if (!force && key === this.last) return; this.last = key;
 
       sendBig(this.ws, this.st, {
-        t: 'snap', seq: ++this.seq, html, base: document.baseURI, title: document.title,
+        t: 'snap', seq: ++this.seq, html, base: this.bare(document.baseURI), title: document.title,
         vw: innerWidth, vh: innerHeight, sx: scrollX, sy: scrollY, sc
       });
     },
@@ -325,7 +325,12 @@
       const copy = clone.querySelectorAll('input,textarea,select');
       live.forEach((el, i) => {
         const c = copy[i]; if (!c) return; const t = (el.type || '').toLowerCase();
-        if (t === 'password' || el.closest('[data-rh-mask]')) { c.setAttribute('value', ''); return; }   // סיסמאות לא נשלחות לעולם
+        // סיסמאות לא נשלחות לעולם - גם אחרי "הצג סיסמה" (השדה הופך ל-text), וגם שדות hidden (טוקנים של הפריימוורק)
+        if (this.secret(el) || t === 'hidden') {
+          c.setAttribute('value', '');
+          if (el.tagName === 'TEXTAREA') c.textContent = '';
+          return;
+        }
         if (el.tagName === 'TEXTAREA') c.textContent = el.value;
         else if (el.tagName === 'SELECT') [...c.options].forEach((o, j) => el.options[j].selected ? o.setAttribute('selected', '') : o.removeAttribute('selected'));
         else if (t === 'checkbox' || t === 'radio') el.checked ? c.setAttribute('checked', '') : c.removeAttribute('checked');
@@ -361,10 +366,26 @@
       // ב-iframe: base לכתובת המקורית, כדי ש-CSS ותמונות ייטענו אצל העוזר
       if (depth > 0) {
         const head = clone.querySelector('head');
-        if (head) { const b = doc.createElement('base'); b.setAttribute('href', doc.baseURI); head.insertBefore(b, head.firstChild); }
+        if (head) { const b = doc.createElement('base'); b.setAttribute('href', this.bare(doc.baseURI)); head.insertBefore(b, head.firstChild); }
       }
-      return clone.outerHTML;
+      return depth > 0 ? clone.outerHTML : this.scrub(clone.outerHTML);
     },
+
+    /** שדה שהערך שלו לא משוקף ושהעוזר לא יכול להקליד בו: סיסמה (גם אם הפך בינתיים ל-text),
+     *  שדה עם autocomplete של סיסמה / קוד חד-פעמי / כרטיס אשראי, או שדה בתוך data-rh-mask */
+    secret(el) {
+      const seen = this.pwSeen || (this.pwSeen = new WeakSet());
+      if ((el.type || '').toLowerCase() === 'password') seen.add(el);
+      if (seen.has(el)) return true;
+      if (/password|one-time-code|cc-(number|csc|exp)/i.test((el.getAttribute && el.getAttribute('autocomplete')) || '')) return true;
+      return !!(el.closest && el.closest('[data-rh-mask]'));
+    },
+
+    /** מזהי סשן של CSP בכתובות (CSPCHD / CSPSHARE) לא נשלחים לעוזר */
+    scrub(html) { return html.replace(/\b(CSPCHD|CSPSHARE)=[^&"'#\s<>]*/gi, '$1='); },
+
+    /** כתובת בלי query ו-hash (שם יכולים להיות טוקנים) - לעוזר מספיק הנתיב, לפתרון כתובות יחסיות */
+    bare(url) { try { const u = new URL(url); return u.origin + u.pathname; } catch (_) { return ''; } },
 
     /** canvas -> JPEG (מטמון קצר; canvas שלא על המסך נשלח ריק כדי לחסוך תעבורה) */
     canvasUrl(cv) {
@@ -399,7 +420,7 @@
       if (!this.control || !this.consent) return;           // הגנה נוספת בצד הלקוח
       const el = m.id ? findById(document, +m.id, 0) : null;
       if (el && el.closest('[data-rh-ignore],[data-rh-block]')) return;
-      if (el && el.type === 'password') return;
+      if (el && (el.type === 'password' || (/^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) && this.secret(el)))) return;
 
       switch (m.e) {
         case 'mv': {

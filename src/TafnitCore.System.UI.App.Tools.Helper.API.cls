@@ -1,9 +1,10 @@
 /// REST API לעזרה מרחוק.
 /// Web Application (למשל /xtafnit-rh): Dispatch Class = TafnitCore.System.UI.App.Tools.Helper.API
-/// Allowed Authentication: Unauthenticated + Password
+/// Allowed Authentication: Unauthenticated בלבד (ברירת המחדל של ההתקנה).
 ///   - Unauthenticated: כדי שהמשתמש במסך ה-login יוכל לבקש קוד
-///   - Password: העוזר מזדהה ב-HTTP Basic בבקשת join
-/// Application Roles: תפקיד עם גישת RW ל-DB של xTafnit (כדי ש-UnknownUser יוכל לשמור סשן)
+///   - Password (HTTP Basic בבקשת join) - רק אם הופעל במפורש: s ^TafnitHelper("BasicAuth")=1 והתקנה מחדש.
+///     כבוי כברירת מחדל: אף מסך לא משתמש בו, והוא פותח נקודת ניחוש סיסמאות של IRIS.
+/// Matching Roles: xTafnitRemoteHelp - קריאה בלבד ל-DB של הקוד (הסשנים ב-IRISTEMP)
 Class TafnitCore.System.UI.App.Tools.Helper.API Extends %CSP.REST
 {
 
@@ -43,6 +44,9 @@ ClassMethod Create() As %Status
         set tOut.token=tToken
         set tOut.scope=tScope
         set tOut.ttl=##class(TafnitCore.System.UI.App.Tools.Helper.Session).Param("CODETTL")
+    } elseif $SYSTEM.Status.GetErrorText(tSC)["https required" {
+        set %response.Status=..#HTTP403FORBIDDEN
+        set tOut.msg="עזרה מרחוק זמינה רק בחיבור מאובטח (HTTPS)"
     } else {
         set %response.Status="429 Too Many Requests"
         set tOut.msg="לא ניתן ליצור קוד כרגע, נסה שוב בעוד כמה דקות"

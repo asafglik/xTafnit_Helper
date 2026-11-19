@@ -19,7 +19,11 @@ ROUTINE core.TafnitHelperUtils
  ;   site     - אתר ה-IIS (ברירת מחדל Default Web Site)
  ;   webRoot  - תיקיית השורש של האתר (ברירת מחדל C:\inetpub\wwwroot\)
  ;   httpsCert  - thumbprint של תעודה ב-LocalMachine\My: יוצר binding של https:443 אם אין (ריק = לא נוגע)
- ;   requireSSL - 1 = /xtafnit-rh ו-helper.html רק ב-HTTPS (אז מ-HTTP אי אפשר לבקש עזרה)
+ ;   requireSSL - 1 = /xtafnit-rh ו-helper.html רק ב-HTTPS גם ברמת IIS (sslFlags).
+ ;                0 = לא נוגע בהגדרה הקיימת - התקנה חוזרת (כולל האוטומטית) לא מבטלת הקשחה.
+ ;                ברמת האפליקציה HTTPS נדרש ממילא (REQUIREHTTPS=1 לכל כתובת - ראה Session)
+ ;
+ ; HTTP Basic ב-/xtafnit-rh כבוי כברירת מחדל (Unauthenticated בלבד). להפעלה: set ^TafnitHelper("BasicAuth")=1 והתקנה מחדש
  ;   do install^core.TafnitHelperUtils("C:\xtafnit-remote-help\","erp.example.co.il",,1,,,"A1B2...THUMBPRINT")
  ;
  ; השלבים: 1. IIS  2. Web Applications  3. קומפילציה וקבצי ווב  4. WebSocket וחיבור  5. פרמטרים
@@ -29,7 +33,7 @@ ROUTINE core.TafnitHelperUtils
 
  ; גרסת הרוטינה - Install.Ready() מחכה שהגרסה הזו תקומפל לפני ההתקנה ברקע (להעלות יחד עם Install.VERSION)
 version() public {
-	quit 2
+	quit 3
 }
 
 install(srcDir="",hosts="",pages="TafnitCore.System.UI.App.Login",resetIIS=0,site="Default Web Site",webRoot="C:\inetpub\wwwroot\",httpsCert="",requireSSL=0) public {
@@ -169,11 +173,16 @@ iis(site,webRoot,appFolder,restFolder,resetIIS,dllDir,httpsCert="",requireSSL=0)
 		else  { do log("[v] Default document default.csp on "_location) }
 	} else { do log("[-] Default document default.csp exists") }
 
-	// HTTPS בלבד לעזרה מרחוק (אופציונלי) - ה-REST ומסך העוזר העצמאי
-	for loc=site_"/"_restFolder,site_"/"_appFolder_"/helper.html" {
-		set rc = $$exec(appcmd,.out,"set","config",loc,"-section:system.webServer/security/access","/sslFlags:"_$select(requireSSL:"Ssl",1:"None"),"/commit:apphost")
-		if rc { do log("[x] sslFlags on "_loc_": "_$$trim(out)) set err = err + 1 }
-		elseif requireSSL { do log("[v] HTTPS required on "_loc) }
+	// HTTPS בלבד לעזרה מרחוק ברמת IIS (אופציונלי) - ה-REST ומסך העוזר העצמאי.
+	// רק מקשיחים: בלי requireSSL לא נוגעים, כדי שהתקנה חוזרת לא תבטל הגדרה קיימת
+	if requireSSL {
+		for loc=site_"/"_restFolder,site_"/"_appFolder_"/helper.html" {
+			set rc = $$exec(appcmd,.out,"set","config",loc,"-section:system.webServer/security/access","/sslFlags:Ssl","/commit:apphost")
+			if rc { do log("[x] sslFlags on "_loc_": "_$$trim(out)) set err = err + 1 }
+			else  { do log("[v] HTTPS required on "_loc) }
+		}
+	} else {
+		do log("[-] IIS sslFlags not changed (requireSSL=0). HTTPS is enforced per host by REQUIREHTTPS")
 	}
 
 	// WebSocket Protocol
@@ -199,11 +208,13 @@ iis(site,webRoot,appFolder,restFolder,resetIIS,dllDir,httpsCert="",requireSSL=0)
 
  ; ───────────── 2. Web Applications ─────────────
 
- ; /xtafnit-rh (REST, Unauthenticated + Password), Resource xTafnit_RemoteSupport,
+ ; /xtafnit-rh (REST, Unauthenticated; + Password רק עם ^TafnitHelper("BasicAuth")=1), Resource xTafnit_RemoteSupport,
  ; role ייעודי xTafnitRemoteHelp עם הרשאת קריאה בלבד ל-DB של הקוד (הנתונים ב-IRISTEMP)
 webApps(ns,cspApp,restApp,pkg) {
 	new $namespace
 	set err = 0
+	// HTTP Basic (Password) על ה-REST - רק בהפעלה מפורשת; נקרא לפני המעבר ל-%SYS
+	set basic = ''$get(^TafnitHelper("BasicAuth"))
 	try {
 		set $namespace = "%SYS"
 
@@ -244,18 +255,22 @@ webApps(ns,cspApp,restApp,pkg) {
 		kill props
 		set props("NameSpace") = ns
 		set props("DispatchClass") = pkg_".API"
-		set props("AutheEnabled") = 96		// 32 = Password, 64 = Unauthenticated
-		set props("Enabled") = 1
+		set props("AutheEnabled") = $select(basic:96,1:64)		// 64 = Unauthenticated, 32 = Password
 		set props("Description") = "xTafnit remote help REST"
 		set props("MatchRoles") = ":"_role
 		if ##class(Security.Applications).Exists(restApp) {
+			// Enabled לא משתנה בעדכון - אפליקציה שהושבתה ידנית נשארת מושבתת
 			$$$ThrowOnError(##class(Security.Applications).Modify(restApp,.props))
 			do log("[v] Web application "_restApp_" updated")
+			kill cur
+			do ##class(Security.Applications).Get(restApp,.cur)
+			if '$get(cur("Enabled")) do log("[!] "_restApp_" is disabled")
 		} else {
+			set props("Enabled") = 1
 			$$$ThrowOnError(##class(Security.Applications).Create(restApp,.props))
 			do log("[v] Web application "_restApp_" created")
 		}
-		do log("    "_restApp_": namespace "_ns_", dispatch "_pkg_".API, Unauthenticated + Password, role "_role_" (read only)")
+		do log("    "_restApp_": namespace "_ns_", dispatch "_pkg_".API, "_$select(basic:"Unauthenticated + Password",1:"Unauthenticated only")_", role "_role_" (read only)")
 	} catch ex {
 		do log("[x] "_ex.DisplayString())
 		set err = err + 1
