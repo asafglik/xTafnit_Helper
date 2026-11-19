@@ -121,13 +121,15 @@ set ^["TAFNIT_PARAMETERS"]xTafnitParams("BaseURLs","erp.example.co.il","helper",
 
 כל הפרמטרים נמצאים תחת `^["TAFNIT_PARAMETERS"]xTafnitParams("BaseURLs",{host},"helper",{PARAMETER})` ונכנסים לתוקף מיד. בלי הגדרה – ברירת המחדל של `Session`.
 
+קוד נוצר רק בכתובת שיש לה הגדרה כלשהי תחת `"helper"` (למשל המסך שבו מופעל הכפתור). הכתובת נשמרת בסשן, וכל הפרמטרים של ההצטרפות נקראים לפיה – לא לפי כותרת `Host` של העוזר.
+
 | פרמטר | ברירת מחדל | משמעות |
 | --- | --- | --- |
 | `{מחלקת מסך}` | – | 1 = הכפתור הצף מוצג במסך הזה בכתובת הזו |
 | `HELPERIPS` | ריק = כל IP | כתובות/קידומות IP מורשות לעוזר, מופרדות בפסיק (`10.0.5.`) |
-| `ANONYMOUSHELPER` | 1 | 0 = כיבוי הצטרפות עם קוד בלבד (`helper.html`) |
+| `ANONYMOUSHELPER` | 0 | 1 = הפעלת הצטרפות עם קוד בלבד, בלי הזדהות (`helper.html`). מומלץ רק יחד עם `HELPERIPS` |
 | `HELPERS`,{USERCODE} | לא מוגדר = כל משתמש מחובר | רשימת עוזרים מורשים ב-`HelperPage` |
-| `TRUSTPROXY` | 0 | 1 = כתובת הלקוח מ-`X-Forwarded-For` (רק מאחורי proxy אמין) |
+| `TRUSTPROXY` | 0 | 1 = כתובת הלקוח מהערך האחרון ב-`X-Forwarded-For` – זה שה-proxy הוסיף (רק מאחורי proxy אמין) |
 | `CODETTL` | 600 | תוקף הקוד בשניות |
 | `MAXSESSION` | 3600 | משך סשן פעיל בשניות |
 | `MAXFAILS` / `LOCKSECS` | 5 / 900 | ניסיונות שגויים עד חסימה / משך החסימה |
@@ -136,8 +138,8 @@ set ^["TAFNIT_PARAMETERS"]xTafnitParams("BaseURLs","erp.example.co.il","helper",
 
 ## אבטחת מידע
 
-- **טופל:** הטוקן לא נכנס ל-URL; ל-`/xtafnit-rh` יש role `xTafnitRemoteHelp` עם קריאה בלבד והסשנים ב-IRISTEMP; נשמר רק hash של טוקנים; הגנת CSRF בכותרת `X-RH`; סיסמאות לא נשלחות לעוזר; העותק מוצג אצל העוזר בלי סקריפטים; השליטה דורשת אישור והמשתמש יכול לבטל בכל רגע.
-- **מומלץ בייצור:** HTTPS (`httpsCert`, אפשר `requireSSL`); `HELPERIPS` והגבלת IP ב-IIS לרשת התמיכה, או `ANONYMOUSHELPER=0`; Dynamic IP Restrictions ב-IIS על `xtafnit-rh` (מיצוי רישיונות); הפעלת אירועי האודיט `xTafnit/RemoteHelp/*`; סימון שדות רגישים ב-`data-rh-mask`.
+- **טופל:** פרמטרי האבטחה נקראים לפי הכתובת שבה נוצר הקוד ולא לפי כותרת `Host` של העוזר; הצטרפות בלי הזדהות כבויה כברירת מחדל; העותק אצל העוזר מוצג עם CSP (משאבים רק מהשרת עצמו, בלי frames מכתובת, בלי `meta refresh`) ועם תקרת גודל; הטוקן לא נכנס ל-URL; ל-`/xtafnit-rh` יש role `xTafnitRemoteHelp` עם קריאה בלבד והסשנים ב-IRISTEMP; נשמר רק hash של טוקנים; הגנת CSRF בכותרת `X-RH`; סיסמאות לא נשלחות לעוזר; העותק מוצג אצל העוזר בלי סקריפטים; השליטה דורשת אישור והמשתמש יכול לבטל בכל רגע.
+- **מומלץ בייצור:** HTTPS (`httpsCert`, אפשר `requireSSL`); `HELPERIPS` והגבלת IP ב-IIS לרשת התמיכה; `ANONYMOUSHELPER=1` רק אם חייבים עוזר חיצוני, ורק יחד עם `HELPERIPS`; bindings ב-IIS עם שם host מפורש; Dynamic IP Restrictions ב-IIS על `xtafnit-rh` (מיצוי רישיונות); הפעלת אירועי האודיט `xTafnit/RemoteHelp/*`; סימון שדות רגישים ב-`data-rh-mask`.
 - **לתשומת לב:** `commonXTafPage` היא מחלקת ליבה – השינוי צריך להיכנס לפריימוורק, אחרת יידרס בעדכון.
 
 ## פיתוח
@@ -151,4 +153,5 @@ set ^["TAFNIT_PARAMETERS"]xTafnitParams("BaseURLs","erp.example.co.il","helper",
 
 - **משתמש:** הכפתור הצף בכל מסך שיורש מ-`commonXTafPage` ומופעל בפרמטרים.
 - **עוזר מחובר:** `xpage.csp?eTafnitClass=TafnitCore.System.UI.App.Tools.Helper.HelperPage` – קוד בלבד.
-- **עוזר עצמאי:** `/xtafnit/helper.html` – קוד בלבד.
+- **עוזר עצמאי:** `/xtafnit/helper.html` – קוד בלבד. דורש `ANONYMOUSHELPER=1` לכתובת.
+- העותק אצל העוזר הוא תוכן מהמחשב של המשתמש: אין להקליד בו סיסמאות או פרטי הזדהות של העוזר (מוצגת על כך שורת אזהרה).

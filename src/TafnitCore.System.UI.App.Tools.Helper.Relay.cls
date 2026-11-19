@@ -14,15 +14,19 @@ Property Code As %String;
 
 Property Role As %String;
 
-/// SERVER_NAME ו-IP של הלקוח, נשמרים ב-OnPreServer (שם %request זמין)
+/// הכתובת (SERVER_NAME) של הסשן - זו שבה נוצר הקוד, לא כותרת Host של החיבור הזה
 Property Host As %String;
 
-Property IP As %String;
+/// REMOTE_ADDR ו-X-Forwarded-For של החיבור, נשמרים ב-OnPreServer (שם %request זמין).
+/// כתובת הלקוח מחושבת מהם רק אחרי האימות, לפי TRUSTPROXY של הכתובת של הסשן.
+Property Remote As %String(MAXLEN = 64);
+
+Property Forwarded As %String(MAXLEN = 2000);
 
 Method OnPreServer() As %Status
 {
-    set ..Host=##class(TafnitCore.System.UI.App.Tools.Helper.Session).Host()
-    set ..IP=##class(TafnitCore.System.UI.App.Tools.Helper.Session).ClientIP()
+    set ..Remote=$EXTRACT($GET(%request.CgiEnvs("REMOTE_ADDR")),1,64)
+    set ..Forwarded=$EXTRACT($GET(%request.CgiEnvs("HTTP_X_FORWARDED_FOR")),*-1999,*)
     quit $$$OK
 }
 
@@ -38,12 +42,15 @@ Method Authenticate(pData As %String) As %String
 
     set tRole=tObj.RoleOf(tIn.t)
     if tRole="" quit ""
+    if tObj.Host="" quit ""
 
     if tRole="helper" {
         if tObj.Status'="Active" quit ""
-        if '##class(TafnitCore.System.UI.App.Tools.Helper.Session).IPAllowed(..IP,..Host) quit ""
+        set tIP=##class(TafnitCore.System.UI.App.Tools.Helper.Session).ResolveIP(..Remote,..Forwarded,tObj.Host)
+        if '##class(TafnitCore.System.UI.App.Tools.Helper.Session).IPAllowed(tIP,tObj.Host) quit ""
     }
     set ..Code=tObj.Code
+    set ..Host=tObj.Host
     quit tRole
 }
 

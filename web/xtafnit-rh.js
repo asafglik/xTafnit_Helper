@@ -16,6 +16,7 @@
     chunk: 16000,                                        // גודל frame (תווי base64)
     frameDepth: 3,                                       // כמה רמות של iframe (מאותו origin) משוקפות - למשל pdfViewer
     canvasQuality: 0.7,                                  // איכות JPEG של canvas משוקף (עמודי PDF)
+    maxSnap: 32e6,                                       // צד עוזר: גודל מקסימלי של תמונת מצב (תווי base64 / בתים אחרי פריסה)
     // כפתור "עזרה מרחוק" - נתפס בדפדפן, ללא תלות בפריימוורק (Name="btnRemoteHelp" במסך ה-Login)
     startSelector: '[id*="btnRemoteHelp"],[name*="btnRemoteHelp"],[data-xrh-start]'
   }, w.XRH_CONFIG || {});
@@ -39,6 +40,7 @@
 
   /** חיפוש אלמנט לפי data-rhid במסמך ובכל ה-iframes מאותו origin שבתוכו */
   function findById(doc, id, depth) {
+    id = +id; if (!Number.isFinite(id)) return null;      // מגיע מהצד השני - לא נכנס לסלקטור כטקסט
     const e = doc.querySelector('[data-rhid="' + id + '"]'); if (e) return e;
     if (depth >= CFG.frameDepth) return null;
     for (const f of doc.querySelectorAll('iframe,frame')) {
@@ -56,10 +58,43 @@
     if (w.CompressionStream) { u = await pipe(u, new CompressionStream('gzip')); z = 1; }
     return { z, b: b64(u) };
   }
+  /** פריסה עם תקרת גודל - הודעה קטנה שמתנפחת (gzip bomb) נעצרת ולא מפילה את הלשונית של העוזר */
+  async function gunzip(u8, max) {
+    const ds = new DecompressionStream('gzip'), wr = ds.writable.getWriter();
+    wr.write(u8).catch(() => { }); wr.close().catch(() => { });
+    const rd = ds.readable.getReader(), parts = []; let n = 0;
+    for (;;) {
+      const { done, value } = await rd.read(); if (done) break;
+      n += value.length;
+      if (n > max) { rd.cancel().catch(() => { }); throw new Error('snapshot too large'); }
+      parts.push(value);
+    }
+    const out = new Uint8Array(n); let o = 0;
+    for (const p of parts) { out.set(p, o); o += p.length; }
+    return out;
+  }
   async function unpack(z, b) {
     let u = unb64(b);
-    if (z) u = await pipe(u, new DecompressionStream('gzip'));
+    if (z) u = await gunzip(u, CFG.maxSnap);
     return JSON.parse(new TextDecoder().decode(u));
+  }
+
+  /* מדיניות התוכן של העותק אצל העוזר. ה-HTML מגיע מהצד השני ואינו מהימן:
+     בלי סקריפטים, בלי טפסים, בלי frames שנטענים מכתובת, ומשאבים (תמונות / CSS / גופנים) רק מהשרת עצמו. */
+  const MIRROR_CSP = "default-src 'none'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; base-uri 'self'; form-action 'none'";
+
+  /** ניקוי עותק שהתקבל (כולל iframes משוקפים, עד frameDepth רמות): בלי meta http-equiv (refresh),
+   *  בלי תוכן פעיל, ו-iframe נשאר רק כ-srcdoc מנוקה - לעולם לא נטען מכתובת. */
+  function sanitize(d, depth) {
+    d.querySelectorAll('meta[http-equiv],script,object,embed,applet,portal').forEach(e => e.remove());
+    d.querySelectorAll('iframe,frame').forEach(f => {
+      const sd = f.getAttribute('srcdoc');
+      f.removeAttribute('src'); f.removeAttribute('srcdoc');
+      if (sd == null || depth >= CFG.frameDepth || f.tagName !== 'IFRAME') return;
+      const inner = new DOMParser().parseFromString(sd, 'text/html');
+      sanitize(inner, depth + 1);
+      f.setAttribute('srcdoc', '<!DOCTYPE html>' + inner.documentElement.outerHTML);
+    });
   }
 
   /** שולח הודעה גדולה כסדרת frames: {"k":"c",id,i,n,z,d}  (ה-"k":"c" חייב להיות ראשון - השרת מזהה לפי זה) */
@@ -72,10 +107,15 @@
   function assembler(onMsg) {
     const buf = {};
     return async f => {
-      const e = buf[f.id] || (buf[f.id] = { n: f.n, p: [], c: 0, z: f.z });
-      if (e.p[f.i] === undefined) { e.p[f.i] = f.d; e.c++; }
+      // השדות מגיעים מהצד השני - נבדקים לפני שימוש
+      if (!Number.isSafeInteger(f.id) || !Number.isSafeInteger(f.n) || !Number.isSafeInteger(f.i) || typeof f.d !== 'string') return;
+      if (f.n < 1 || f.n > 20000 || f.i < 0 || f.i >= f.n) return;
+      const e = buf[f.id] || (buf[f.id] = { n: f.n, p: [], c: 0, z: f.z, len: 0 });
+      if (f.i >= e.n) return;
+      if (e.p[f.i] === undefined) { e.p[f.i] = f.d; e.c++; e.len += f.d.length; }
+      if (e.len > CFG.maxSnap) { delete buf[f.id]; return; }
       for (const k in buf) if (+k < f.id - 3) delete buf[k];
-      if (e.c === e.n) { delete buf[f.id]; onMsg(await unpack(e.z, e.p.join(''))); }
+      if (e.c === e.n) { delete buf[f.id]; try { onMsg(await unpack(e.z, e.p.join(''))); } catch (_) { } }
     };
   }
 
@@ -436,12 +476,18 @@
 
     build(host) {
       host.innerHTML = '';
+      // התוכן שבמסגרת מגיע מהמחשב של המשתמש - העוזר צריך לדעת שזה לא מסך של המערכת שלו
+      const note = document.createElement('div');
+      note.style.cssText = 'box-sizing:border-box;height:26px;padding:4px 10px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;direction:rtl;font:13px/18px system-ui,Arial,sans-serif;background:#fef3c7;color:#78350f';
+      note.textContent = 'תוכן מרוחק מהמחשב של המשתמש – אין להקליד כאן סיסמאות או פרטי הזדהות שלך';
+      host.appendChild(note);
       const wrap = this.wrap = document.createElement('div');
-      wrap.style.cssText = 'position:relative;overflow:hidden;width:100%;height:100%;background:#1f2937';
+      wrap.style.cssText = 'position:relative;overflow:hidden;width:100%;height:calc(100% - 26px);background:#1f2937';
       const fr = this.fr = document.createElement('iframe');
       fr.setAttribute('sandbox', 'allow-same-origin');                 // בלי scripts / forms / popups
       fr.style.cssText = 'border:0;background:#fff;position:absolute;left:0;top:0;transform-origin:0 0';
-      fr.srcdoc = '<!DOCTYPE html><html><body></body></html>';
+      // ה-CSP נקבע במסמך הראשוני של המסגרת: הוא חל על כל עותק שיוחלף לתוכו, ועובר בירושה ל-iframes המשוקפים (srcdoc)
+      fr.srcdoc = '<!DOCTYPE html><html><head><meta http-equiv="Content-Security-Policy" content="' + MIRROR_CSP + '"></head><body></body></html>';
       fr.onload = () => { if (!fr._bound) { fr._bound = true; this.bindInput(fr.contentDocument); } };
       wrap.appendChild(fr); host.appendChild(wrap);
       addEventListener('resize', () => this.fit());
@@ -456,21 +502,21 @@
     onSnap(m) {
       if (m.t !== 'snap' || m.seq <= this.lastSeq) return; this.lastSeq = m.seq;
       const doc = this.fr.contentDocument; if (!doc || !doc.documentElement) return;
-      this.vw = m.vw; this.vh = m.vh; this.fit();
+      this.vw = Math.min(Math.max(+m.vw || 1280, 100), 10000); this.vh = Math.min(Math.max(+m.vh || 800, 100), 10000); this.fit();
 
       // המשתמש עשוי לגלוש בכתובת פנימית (למשל http://10.0.0.5 או xtafnit.local) שהעוזר החיצוני לא מגיע אליה.
       // מחליפים את ה-origin של המשתמש ב-origin שדרכו העוזר מחובר לאותו שרת.
-      let html = m.html, baseHref = m.base;
+      if (typeof m.html !== 'string') return;
+      let html = m.html, baseHref = location.href;
       try {
         const ub = new URL(m.base);
-        if (ub.origin !== location.origin) {
-          html = html.split(ub.origin).join(location.origin);
-          baseHref = location.origin + ub.pathname;
-        }
+        if (ub.origin !== location.origin) html = html.split(ub.origin).join(location.origin);
+        baseHref = location.origin + ub.pathname;        // תמיד ב-origin של העוזר
       } catch (_) { }
 
       const d = new DOMParser().parseFromString(html, 'text/html');
-      d.querySelectorAll('meta[http-equiv]').forEach(e => e.remove());
+      d.querySelectorAll('base').forEach(e => e.remove());
+      sanitize(d, 0);
       const base = d.createElement('base'); base.href = baseHref; d.head.insertBefore(base, d.head.firstChild);
 
       const a = doc.activeElement, fid = a && a.getAttribute && a.getAttribute('data-rhid');
@@ -483,7 +529,7 @@
       // גלילה - גם בתוך iframes משוקפים (srcdoc נטען אחרי ההחלפה, לכן שוב ב-load של כל iframe)
       const applyScroll = () => {
         this.mute = Date.now() + 300;
-        (m.sc || []).forEach(s => { const e = findById(doc, s.id, 0); if (e) { e.scrollTop = s.t; e.scrollLeft = s.l; } });
+        (Array.isArray(m.sc) ? m.sc : []).forEach(s => { const e = s && findById(doc, s.id, 0); if (e) { e.scrollTop = +s.t || 0; e.scrollLeft = +s.l || 0; } });
       };
       const bound = this.boundDocs || (this.boundDocs = new WeakSet());
       const hook = (d, depth) => d.querySelectorAll('iframe,frame').forEach(f => f.addEventListener('load', () => {
@@ -495,7 +541,7 @@
       }));
       hook(doc, 0);
       applyScroll();
-      doc.defaultView.scrollTo(m.sx, m.sy);
+      doc.defaultView.scrollTo(+m.sx || 0, +m.sy || 0);
       this.onState('live', m.title || '');
     },
 

@@ -9,8 +9,9 @@
 Class TafnitCore.System.UI.App.Tools.Helper.Session Extends %Persistent
 {
 
-/// 0 = כיבוי הצטרפות עם קוד בלבד (helper.html). HelperPage ו-HTTP Basic ממשיכים לעבוד
-Parameter ANONYMOUSHELPER = 1;
+/// 1 = הפעלת הצטרפות עם קוד בלבד, בלי הזדהות (helper.html). כבוי כברירת מחדל -
+/// קוד בן 6 ספרות לבדו אינו הגנה מספקת מול ניחוש. HelperPage ו-HTTP Basic עובדים תמיד.
+Parameter ANONYMOUSHELPER = 0;
 
 /// תוקף הקוד עד שעוזר מצטרף (שניות)
 Parameter CODETTL = 600;
@@ -31,7 +32,8 @@ Parameter MAXCREATES = 5;
 /// דוגמה: "203.0.113.,198.51.100.25" (קידומת חייבת להסתיים בנקודה)
 Parameter HELPERIPS;
 
-/// 1 אם השרת מאחורי reverse proxy שמוסיף X-Forwarded-For אמין
+/// 1 אם השרת מאחורי reverse proxy שמוסיף X-Forwarded-For אמין.
+/// נלקח הערך האחרון (הימני) בכותרת - זה שה-proxy עצמו הוסיף; הערכים שלפניו נשלטים ע"י הלקוח.
 Parameter TRUSTPROXY = 0;
 
 /// מה קורה כשמשתמש שביקש עזרה ממסך ה-login מתחבר למערכת:
@@ -41,6 +43,10 @@ Parameter TRUSTPROXY = 0;
 Parameter LOGINPOLICY = "reconsent";
 
 Property Code As %String(MAXLEN = 6) [ Required ];
+
+/// הכתובת (SERVER_NAME) שבה המשתמש יצר את הקוד. כל פרמטרי האבטחה של הסשן נקראים לפיה,
+/// ולא לפי כותרת Host של מי שמצטרף - אחרת עוזר ששולח Host אחר היה מקבל את ברירות המחדל.
+Property Host As %String(MAXLEN = 255);
 
 /// login = נוצר ממסך הכניסה (משתמש אנונימי), app = מתוך המערכת
 Property Scope As %String(VALUELIST = ",login,app") [ InitialExpression = "app" ];
@@ -77,7 +83,16 @@ Index UserIdx On (UserName, Status);
 ClassMethod Host() As %String
 {
     if '$ISOBJECT($GET(%request)) quit ""
-    quit $GET(%request.CgiEnvs("SERVER_NAME"))
+    set tHost=$GET(%request.CgiEnvs("SERVER_NAME"))
+    quit $SELECT($LENGTH(tHost)>255:"",1:tHost)
+}
+
+/// האם הכתובת הוגדרה לעזרה מרחוק (יש לה ענף "helper" ב-xTafnitParams, כמו זה שמפעיל את הכפתור).
+/// קוד נוצר רק בכתובת מוגדרת - כך אין סשן שרץ על ברירות המחדל בגלל כותרת Host לא מוכרת.
+ClassMethod HostConfigured(pHost As %String) As %Boolean
+{
+    if $GET(pHost)="" quit 0
+    quit ''$DATA(^["TAFNIT_PARAMETERS"]xTafnitParams("BaseURLs",pHost,"helper"))
 }
 
 /// ערך פרמטר לכתובת: ^["TAFNIT_PARAMETERS"]xTafnitParams("BaseURLs",host,"helper",name),
@@ -108,15 +123,21 @@ ClassMethod Hash(pToken As %String) As %String
     quit $SYSTEM.Encryption.Base64Encode($SYSTEM.Encryption.SHAHash(256,pToken))
 }
 
-ClassMethod ClientIP() As %String
+/// כתובת הלקוח. pHost = הכתובת שלפיה נקרא TRUSTPROXY (ריק = הכתובת של הבקשה הנוכחית)
+ClassMethod ClientIP(pHost As %String = "") As %String
 {
     if '$ISOBJECT($GET(%request)) quit ""
-    set tIP=$GET(%request.CgiEnvs("REMOTE_ADDR"))
-    if ..Param("TRUSTPROXY") {
-        set tFwd=$ZSTRIP($PIECE($GET(%request.CgiEnvs("HTTP_X_FORWARDED_FOR")),",",1),"<>W")
-        if tFwd'="" set tIP=tFwd
-    }
-    quit tIP
+    quit ..ResolveIP($GET(%request.CgiEnvs("REMOTE_ADDR")),$GET(%request.CgiEnvs("HTTP_X_FORWARDED_FOR")),pHost)
+}
+
+/// כתובת הלקוח מתוך REMOTE_ADDR ו-X-Forwarded-For (ה-Relay שומר אותם ב-OnPreServer ומחשב אחרי האימות).
+/// עם TRUSTPROXY נלקח הערך האחרון ב-X-Forwarded-For, ורק אם הוא נראה כמו כתובת IP.
+ClassMethod ResolveIP(pRemote As %String, pForwarded As %String, pHost As %String = "") As %String
+{
+    if '..Param("TRUSTPROXY",pHost) quit pRemote
+    set tFwd=$ZSTRIP($PIECE(pForwarded,",",*),"<>W")
+    if (tFwd="")||($LENGTH(tFwd)>45)||($TRANSLATE(tFwd,"0123456789abcdefABCDEF.:[]")'="") quit pRemote
+    quit tFwd
 }
 
 ClassMethod IPAllowed(pIP As %String, pHost As %String = "") As %Boolean
@@ -184,9 +205,14 @@ ClassMethod Create(Output pCode As %String, Output pToken As %String, Output pSc
     set (pCode,pToken,pScope)=""
     try {
         set tUser=$USERNAME
-        set tIP=..ClientIP()
+        set tHost=..Host()
+        set tIP=..ClientIP(tHost)
         set tScope=$SELECT(tUser="UnknownUser":"login",1:"app")
         
+        if '..HostConfigured(tHost) {
+            do ..Audit("CreateDenied","host="_tHost_" ip="_tIP)
+            throw ##class(%Exception.StatusException).CreateFromStatus($$$ERROR($$$GeneralError,"host not configured"))
+        }
         if '..CreateAllowed(tIP) {
             do ..Audit("CreateThrottled","ip="_tIP)
             throw ##class(%Exception.StatusException).CreateFromStatus($$$ERROR($$$GeneralError,"too many requests"))
@@ -215,6 +241,7 @@ ClassMethod Create(Output pCode As %String, Output pToken As %String, Output pSc
         set tObj=..%New()
         set tObj.Code=tCode
         set tObj.Scope=tScope
+        set tObj.Host=tHost
         set tObj.UserName=tUser
         set tObj.UserIP=tIP
         set tObj.UserTokenHash=..Hash(tToken)
@@ -226,7 +253,7 @@ ClassMethod Create(Output pCode As %String, Output pToken As %String, Output pSc
         set ^IRIS.Temp.xTafnitRH("s",tCode)=tObj.ExpiresSec
         
         set pCode=tCode, pToken=tToken, pScope=tScope
-        do ..Audit("Create","scope="_tScope_" user="_tUser_" ip="_tIP)
+        do ..Audit("Create","scope="_tScope_" user="_tUser_" ip="_tIP_" host="_tHost)
         set tSC=$$$OK
     } catch ex {
         set tSC=ex.AsStatus()
@@ -242,77 +269,87 @@ ClassMethod Join(pCode As %String, Output pToken As %String) As %Status
         do ..Audit("JoinDenied","helper="_$USERNAME_" ip="_..ClientIP())
         quit $$$ERROR($$$GeneralError,"denied")
     }
-    quit ..DoJoin(pCode,$USERNAME,.pToken)
+    quit ..DoJoin(pCode,$USERNAME,"basic",.pToken)
 }
 
 /// הצטרפות עוזר שמחובר ל-xTafnit (מסך TafnitCore.System.UI.App.Tools.Helper.HelperPage) - קוד בלבד.
 /// pHelperName מגיע מהסשן של xTafnit (Environment.Security.UserCode), לא מהלקוח.
 /// אם מוגדר xTafnitParams("BaseURLs",host,"helper","HELPERS") - רק המשתמשים שמופיעים בו
-/// (שם כניסה באותיות גדולות: ("HELPERS","USERCODE")=1) רשאים.
+/// (שם כניסה באותיות גדולות: ("HELPERS","USERCODE")=1) רשאים. host = הכתובת של הסשן (ראה DoJoin).
 ClassMethod JoinAs(pCode As %String, pHelperName As %String, Output pToken As %String) As %Status
 {
     set pToken=""
     if $GET(pHelperName)="" quit $$$ERROR($$$GeneralError,"denied")
-    set tHost=..Host()
-    if tHost'="",$DATA(^["TAFNIT_PARAMETERS"]xTafnitParams("BaseURLs",tHost,"helper","HELPERS")),'$DATA(^["TAFNIT_PARAMETERS"]xTafnitParams("BaseURLs",tHost,"helper","HELPERS",$ZCONVERT(pHelperName,"U"))) {
-        do ..Audit("JoinDenied","helper="_pHelperName_" ip="_..ClientIP())
-        quit $$$ERROR($$$GeneralError,"denied")
-    }
-    quit ..DoJoin(pCode,pHelperName,.pToken)
+    quit ..DoJoin(pCode,pHelperName,"xtafnit",.pToken)
 }
 
-/// הצטרפות עוזר עם קוד בלבד, בלי הזדהות (helper.html).
+/// הצטרפות עוזר עם קוד בלבד, בלי הזדהות (helper.html). כבוי כברירת מחדל.
 /// ההגנות: אישור המשתמש, תוקף הקוד, חסימה לפי IP אחרי MAXFAILS ניסיונות, ו-HELPERIPS.
-/// לכיבוי לכתובת: s ^["TAFNIT_PARAMETERS"]xTafnitParams("BaseURLs",host,"helper","ANONYMOUSHELPER")=0
+/// להפעלה לכתובת: s ^["TAFNIT_PARAMETERS"]xTafnitParams("BaseURLs",host,"helper","ANONYMOUSHELPER")=1
 ClassMethod JoinAnonymous(pCode As %String, Output pToken As %String) As %Status
 {
     set pToken=""
-    if '..Param("ANONYMOUSHELPER") {
-        do ..Audit("JoinDenied","helper=anonymous ip="_..ClientIP())
-        quit $$$ERROR($$$GeneralError,"denied")
-    }
-    quit ..DoJoin(pCode,"anonymous@"_..ClientIP(),.pToken)
+    quit ..DoJoin(pCode,"anonymous","anonymous",.pToken)
 }
 
-ClassMethod DoJoin(pCode As %String, pHelperName As %String, Output pToken As %String) As %Status [ Private ]
+/// pMode: anonymous (קוד בלבד) | xtafnit (עוזר מחובר, HelperPage) | basic (HTTP Basic).
+/// כל בדיקות המדיניות (ANONYMOUSHELPER, HELPERS, HELPERIPS, TRUSTPROXY, MAXSESSION) נעשות לפי
+/// tObj.Host - הכתובת שבה נוצר הקוד - ולא לפי כותרת Host של בקשת ההצטרפות.
+ClassMethod DoJoin(pCode As %String, pHelperName As %String, pMode As %String, Output pToken As %String) As %Status [ Private ]
 {
     set tSC=$$$OK, pToken=""
     try {
-        set tIP=..ClientIP()
-        set tKey=pHelperName_"|"_tIP
-        if ..IsLocked(tKey) { set tSC=$$$ERROR($$$GeneralError,"locked") quit }
-
-        if '..IPAllowed(tIP) {
-            do ..Audit("JoinDeniedIP","helper="_pHelperName_" ip="_tIP)
-            set tSC=$$$ERROR($$$GeneralError,"ip denied") quit
-        }
+        // חסימה לפי הכתובת של הבקשה - נבדקת לפני שנפתח הקוד, כדי שניחוש נכון לא יעקוף אותה
+        set tReqIP=..ClientIP()
+        set tReqKey=pHelperName_"|"_tReqIP
+        if ..IsLocked(tReqKey) { set tSC=$$$ERROR($$$GeneralError,"locked") quit }
 
         set tObj=..OpenByCode(pCode)
-        if '$ISOBJECT(tObj)||(tObj.Status'="Pending") {
-            do ..RegisterFail(tKey)
-            do ..Audit("JoinFail","helper="_pHelperName_" ip="_tIP)
+        if '$ISOBJECT(tObj)||(tObj.Status'="Pending")||(tObj.Host="") {
+            do ..RegisterFail(tReqKey)
+            do ..Audit("JoinFail","helper="_pHelperName_" ip="_tReqIP)
             set tSC=$$$ERROR($$$GeneralError,"invalid code") quit
         }
+
+        // מכאן - הפרמטרים של הכתובת שבה נוצר הקוד
+        set tHost=tObj.Host
+        set tIP=..ClientIP(tHost)
+        set tKey=pHelperName_"|"_tIP
+        if (tKey'=tReqKey)&&..IsLocked(tKey) { set tSC=$$$ERROR($$$GeneralError,"locked") quit }
+        set tHelper=$SELECT(pMode="anonymous":"anonymous@"_tIP,1:pHelperName)
+
+        set tDenied=""
+        if (pMode="anonymous")&&'..Param("ANONYMOUSHELPER",tHost) set tDenied="JoinDenied"
+        if (tDenied="")&&(pMode="xtafnit")&&$DATA(^["TAFNIT_PARAMETERS"]xTafnitParams("BaseURLs",tHost,"helper","HELPERS"))&&'$DATA(^["TAFNIT_PARAMETERS"]xTafnitParams("BaseURLs",tHost,"helper","HELPERS",$ZCONVERT(pHelperName,"U"))) set tDenied="JoinDenied"
+        if (tDenied="")&&'..IPAllowed(tIP,tHost) set tDenied="JoinDeniedIP"
+        if tDenied'="" {
+            // נספר כניסיון שגוי - כדי שהתשובה לא תשמש לבדיקה אם קוד קיים
+            do ..RegisterFail(tReqKey)
+            if tKey'=tReqKey do ..RegisterFail(tKey)
+            do ..Audit(tDenied,"helper="_tHelper_" ip="_tIP_" host="_tHost)
+            set tSC=$$$ERROR($$$GeneralError,"denied") quit
+        }
+
         if tObj.UserName=pHelperName { set tSC=$$$ERROR($$$GeneralError,"self") quit }
         if ..NowSec()>tObj.ExpiresSec {
             set tObj.Status="Expired" do tObj.%Save()
-            do ..RegisterFail(tKey)
+            do ..RegisterFail(tReqKey)
             set tSC=$$$ERROR($$$GeneralError,"expired") quit
         }
         
         set tToken=..NewToken()
         set tObj.Status="Active"
-        set tObj.HelperName=pHelperName
+        set tObj.HelperName=tHelper
         set tObj.HelperIP=tIP
         set tObj.HelperTokenHash=..Hash(tToken)
-        set tObj.ExpiresSec=..NowSec()+..Param("MAXSESSION")
+        set tObj.ExpiresSec=..NowSec()+..Param("MAXSESSION",tHost)
         $$$ThrowOnError(tObj.%Save())
 
         set ^IRIS.Temp.xTafnitRH("s",tObj.Code)=tObj.ExpiresSec
-        kill ^IRIS.Temp.xTafnitRH("fail",tKey)
+        kill ^IRIS.Temp.xTafnitRH("fail",tReqKey),^IRIS.Temp.xTafnitRH("fail",tKey)
 
-        do ..Enqueue(tObj.Code,"user",{"k":"m","t":"joined","helper":(pHelperName)}.%ToJSON())
-        do ..Audit("Join","scope="_tObj.Scope_" user="_tObj.UserName_" helper="_pHelperName_" ip="_tIP)
+        do ..Enqueue(tObj.Code,"user",{"k":"m","t":"joined","helper":(tHelper)}.%ToJSON())
+        do ..Audit("Join","scope="_tObj.Scope_" user="_tObj.UserName_" helper="_tHelper_" ip="_tIP_" host="_tHost)
         set pToken=tToken
     } catch ex {
         set tSC=ex.AsStatus()
